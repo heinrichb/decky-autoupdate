@@ -23,7 +23,13 @@ import {
 
 type FlatpakCheckResult = { success: boolean; updates: FlatpakUpdate[]; error: string };
 type SubprocessResult = { success: boolean; stdout: string; stderr: string; returncode: number };
-type SteamosCheckResult = { success: boolean; hasUpdate: boolean; buildId: string; needsReboot: boolean; error: string };
+type SteamosCheckResult = {
+  success: boolean;
+  hasUpdate: boolean;
+  buildId: string;
+  needsReboot: boolean;
+  error: string;
+};
 
 // ── Steam provider ───────────────────────────────────────────
 
@@ -62,7 +68,9 @@ export async function checkFlatpakOnly(): Promise<UpdateCheckResult> {
     debug("checkFlatpakOnly: calling check_flatpak_updates...");
     const t0 = Date.now();
     const check = await callPluginMethod<FlatpakCheckResult>("check_flatpak_updates", 60_000);
-    debug(`checkFlatpakOnly: response in ${Date.now() - t0}ms — success=${check.success}, updates=${check.updates?.length ?? 0}`);
+    debug(
+      `checkFlatpakOnly: response in ${Date.now() - t0}ms — success=${check.success}, updates=${check.updates?.length ?? 0}`,
+    );
     if (!check.success) {
       return emptyResult("flatpak", [check.error || "Failed to check for Flatpak updates"]);
     }
@@ -245,7 +253,9 @@ export async function checkAndApplySteamos(): Promise<UpdateCheckResult> {
     debug("checkAndApplySteamos: calling check_steamos_updates...");
     const t0 = Date.now();
     const check = await callPluginMethod<SteamosCheckResult>("check_steamos_updates", 30_000);
-    debug(`checkAndApplySteamos: response in ${Date.now() - t0}ms — success=${check.success}, hasUpdate=${check.hasUpdate}`);
+    debug(
+      `checkAndApplySteamos: response in ${Date.now() - t0}ms — success=${check.success}, hasUpdate=${check.hasUpdate}`,
+    );
 
     if (!check.success) {
       return emptyResult("steamos", [check.error || "Failed to check SteamOS updates"]);

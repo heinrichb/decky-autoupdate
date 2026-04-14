@@ -1,29 +1,22 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-const { mockCheckFlatpakUpdates, mockApplyFlatpakUpdates, mockGetFlatpakAvailable } = vi.hoisted(() => ({
-  mockCheckFlatpakUpdates: vi.fn(),
-  mockApplyFlatpakUpdates: vi.fn(),
-  mockGetFlatpakAvailable: vi.fn(),
-}));
+const mockCallPluginMethod = vi.fn();
 
-vi.mock("@decky/api", () => ({
-  callable: (name: string) => {
-    switch (name) {
-      case "check_flatpak_updates":
-        return mockCheckFlatpakUpdates;
-      case "apply_flatpak_updates":
-        return mockApplyFlatpakUpdates;
-      case "get_flatpak_available":
-        return mockGetFlatpakAvailable;
-      default:
-        return vi.fn();
-    }
-  },
+vi.mock("../deckyApi", () => ({
+  callPluginMethod: (...args: unknown[]) => mockCallPluginMethod(...args),
+  isDeckyAvailable: vi.fn(),
+  findPluginUpdates: vi.fn(),
+  installPluginsAndConfirm: vi.fn(),
+  checkDeckyLoaderUpdate: vi.fn(),
+  applyDeckyLoaderUpdate: vi.fn(),
 }));
 
 vi.mock("../steamClient", () => ({
   forceStartAllUpdates: vi.fn(),
 }));
+
+// providers.ts no longer imports from @decky/api, but mock it in case
+vi.mock("@decky/api", () => ({}));
 
 import { checkFlatpakOnly, applyFlatpak, isFlatpakAvailable } from "../providers";
 import { FlatpakUpdate } from "../types";
@@ -32,9 +25,16 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
+function mockBackendMethod(method: string, response: unknown) {
+  mockCallPluginMethod.mockImplementation((name: string) => {
+    if (name === method) return Promise.resolve(response);
+    return Promise.reject(new Error(`unexpected call: ${name}`));
+  });
+}
+
 describe("checkFlatpakOnly", () => {
   it("returns updates on success", async () => {
-    mockCheckFlatpakUpdates.mockResolvedValue({
+    mockBackendMethod("check_flatpak_updates", {
       success: true,
       updates: [
         { id: "org.mozilla.firefox", name: "Firefox", downloadSize: "50 MB" },
@@ -53,7 +53,7 @@ describe("checkFlatpakOnly", () => {
   });
 
   it("returns empty result with error on backend failure", async () => {
-    mockCheckFlatpakUpdates.mockResolvedValue({
+    mockBackendMethod("check_flatpak_updates", {
       success: false,
       updates: [],
       error: "flatpak not responding",
@@ -65,7 +65,7 @@ describe("checkFlatpakOnly", () => {
   });
 
   it("returns empty result with default error when error string is empty", async () => {
-    mockCheckFlatpakUpdates.mockResolvedValue({
+    mockBackendMethod("check_flatpak_updates", {
       success: false,
       updates: [],
       error: "",
@@ -76,7 +76,7 @@ describe("checkFlatpakOnly", () => {
   });
 
   it("catches exceptions and returns error result", async () => {
-    mockCheckFlatpakUpdates.mockRejectedValue(new Error("network timeout"));
+    mockCallPluginMethod.mockRejectedValue(new Error("network timeout"));
 
     const result = await checkFlatpakOnly();
     expect(result.pendingCount).toBe(0);
@@ -84,7 +84,7 @@ describe("checkFlatpakOnly", () => {
   });
 
   it("returns zero updates when backend returns empty list", async () => {
-    mockCheckFlatpakUpdates.mockResolvedValue({
+    mockBackendMethod("check_flatpak_updates", {
       success: true,
       updates: [],
       error: "",
@@ -104,7 +104,7 @@ describe("applyFlatpak", () => {
   ];
 
   it("returns forcedCount equal to pending count on success", async () => {
-    mockApplyFlatpakUpdates.mockResolvedValue({
+    mockBackendMethod("apply_flatpak_updates", {
       success: true,
       stdout: "ok",
       stderr: "",
@@ -120,7 +120,7 @@ describe("applyFlatpak", () => {
   });
 
   it("returns zero forcedCount with error on failure", async () => {
-    mockApplyFlatpakUpdates.mockResolvedValue({
+    mockBackendMethod("apply_flatpak_updates", {
       success: false,
       stdout: "",
       stderr: "permission denied",
@@ -133,7 +133,7 @@ describe("applyFlatpak", () => {
   });
 
   it("uses default error when stderr is empty", async () => {
-    mockApplyFlatpakUpdates.mockResolvedValue({
+    mockBackendMethod("apply_flatpak_updates", {
       success: false,
       stdout: "",
       stderr: "",
@@ -145,7 +145,7 @@ describe("applyFlatpak", () => {
   });
 
   it("catches exceptions", async () => {
-    mockApplyFlatpakUpdates.mockRejectedValue(new Error("subprocess crashed"));
+    mockCallPluginMethod.mockRejectedValue(new Error("subprocess crashed"));
 
     const result = await applyFlatpak(pending);
     expect(result.forcedCount).toBe(0);
@@ -156,18 +156,36 @@ describe("applyFlatpak", () => {
 
 describe("isFlatpakAvailable", () => {
   it("returns true when backend says available", async () => {
-    // Re-import to reset module-level cache
     vi.resetModules();
+    // Re-mock after resetModules
+    vi.doMock("../deckyApi", () => ({
+      callPluginMethod: () => Promise.resolve(true),
+      isDeckyAvailable: vi.fn(),
+      findPluginUpdates: vi.fn(),
+      installPluginsAndConfirm: vi.fn(),
+      checkDeckyLoaderUpdate: vi.fn(),
+      applyDeckyLoaderUpdate: vi.fn(),
+    }));
+    vi.doMock("../steamClient", () => ({ forceStartAllUpdates: vi.fn() }));
+    vi.doMock("@decky/api", () => ({}));
     const { isFlatpakAvailable: freshCheck } = await import("../providers");
-    mockGetFlatpakAvailable.mockResolvedValue(true);
     const result = await freshCheck();
     expect(result).toBe(true);
   });
 
   it("returns false on exception without caching", async () => {
     vi.resetModules();
+    vi.doMock("../deckyApi", () => ({
+      callPluginMethod: () => Promise.reject(new Error("ipc error")),
+      isDeckyAvailable: vi.fn(),
+      findPluginUpdates: vi.fn(),
+      installPluginsAndConfirm: vi.fn(),
+      checkDeckyLoaderUpdate: vi.fn(),
+      applyDeckyLoaderUpdate: vi.fn(),
+    }));
+    vi.doMock("../steamClient", () => ({ forceStartAllUpdates: vi.fn() }));
+    vi.doMock("@decky/api", () => ({}));
     const { isFlatpakAvailable: freshCheck } = await import("../providers");
-    mockGetFlatpakAvailable.mockRejectedValue(new Error("ipc error"));
     const result = await freshCheck();
     expect(result).toBe(false);
   });

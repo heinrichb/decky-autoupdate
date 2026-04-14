@@ -34,14 +34,7 @@ import {
   checkAndApplySteamos,
 } from "./providers";
 import { callPluginMethod } from "./deckyApi";
-import {
-  combinedToastBody,
-  log,
-  logError,
-  debug,
-  errorMessage,
-  setDebugEnabled,
-} from "./helpers";
+import { combinedToastBody, log, logError, debug, errorMessage, setDebugEnabled } from "./helpers";
 
 const IPC_TIMEOUT = 10_000;
 const getSettings = () => callPluginMethod<Settings>("get_settings", IPC_TIMEOUT);
@@ -204,10 +197,14 @@ class AutoUpdateService {
 
     log(
       "Service started —",
-      "checkOnWake:", this.state.settings.checkOnWake,
-      "| flatpak:", this.state.flatpakAvailable,
-      "| decky:", this.state.deckyAvailable,
-      "| steamos:", this.state.steamosAvailable,
+      "checkOnWake:",
+      this.state.settings.checkOnWake,
+      "| flatpak:",
+      this.state.flatpakAvailable,
+      "| decky:",
+      this.state.deckyAvailable,
+      "| steamos:",
+      this.state.steamosAvailable,
     );
     this.notify();
 
@@ -509,7 +506,9 @@ class AutoUpdateService {
       debug(`${source}: calling provider...`);
       const result = await this.getProvider(source)();
       const elapsed = Date.now() - t0;
-      log(`${source}: check complete in ${elapsed}ms — ${result.pendingCount} pending, ${result.forcedCount} applied, ${result.errors.length} errors`);
+      log(
+        `${source}: check complete in ${elapsed}ms — ${result.pendingCount} pending, ${result.forcedCount} applied, ${result.errors.length} errors`,
+      );
       if (result.errors.length > 0) {
         debug(`${source}: errors:`, result.errors);
       }
@@ -548,7 +547,13 @@ class AutoUpdateService {
     debug("flatpakProvider: checking for updates...");
     const checkResult = await checkFlatpakOnly();
     if (checkResult.errors.length > 0 || checkResult.pendingCount === 0) {
-      debug("flatpakProvider: returning early —", checkResult.pendingCount, "pending,", checkResult.errors.length, "errors");
+      debug(
+        "flatpakProvider: returning early —",
+        checkResult.pendingCount,
+        "pending,",
+        checkResult.errors.length,
+        "errors",
+      );
       return checkResult;
     }
     if (this.state.settings.flatpakAutoApply) {

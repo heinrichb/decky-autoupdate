@@ -124,6 +124,6 @@ describe("deckyStatusLabel", () => {
   });
 
   it("returns default label for idle", () => {
-    expect(deckyStatusLabel("idle")).toBe("Check Decky");
+    expect(deckyStatusLabel("idle")).toBe("Check Plugins");
   });
 });

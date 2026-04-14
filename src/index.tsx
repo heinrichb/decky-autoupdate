@@ -90,7 +90,12 @@ function AutoUpdatePanel() {
     return (
       <span style={{ color }}>
         {text}
-        {time ? <span style={{ opacity: 0.5 }}> {"\u00b7"} {time}</span> : null}
+        {time ? (
+          <span style={{ opacity: 0.5 }}>
+            {" "}
+            {"\u00b7"} {time}
+          </span>
+        ) : null}
       </span>
     );
   };
@@ -129,7 +134,11 @@ function AutoUpdatePanel() {
             <PanelSectionRow>
               <ButtonItem
                 label="Steam"
-                description={statusDesc("steam", state.steamLastCheck, !state.steamReady ? "SteamClient unavailable" : undefined)}
+                description={statusDesc(
+                  "steam",
+                  state.steamLastCheck,
+                  !state.steamReady ? "SteamClient unavailable" : undefined,
+                )}
                 layout="inline"
                 disabled={steamBusy}
                 onClick={() => handleCheck("steam")}
@@ -150,7 +159,9 @@ function AutoUpdatePanel() {
                       {state.steamLastCheck.updates.map((u) => (
                         <div key={u.appId} style={{ marginBottom: 4 }}>
                           <div>{u.name}</div>
-                          <div style={{ opacity: 0.6 }}>{u.state} {"\u2014"} {formatBytes(u.bytesToDownload)}</div>
+                          <div style={{ opacity: 0.6 }}>
+                            {u.state} {"\u2014"} {formatBytes(u.bytesToDownload)}
+                          </div>
                         </div>
                       ))}
                     </div>
@@ -178,7 +189,9 @@ function AutoUpdatePanel() {
               <>
                 <PanelSectionRow>
                   <ButtonItem layout="below" onClick={() => setShowFlatpakUpdates(!showFlatpakUpdates)}>
-                    {showFlatpakUpdates ? "Hide details" : `Show ${state.flatpakLastCheck.flatpakUpdates.length} updates`}
+                    {showFlatpakUpdates
+                      ? "Hide details"
+                      : `Show ${state.flatpakLastCheck.flatpakUpdates.length} updates`}
                   </ButtonItem>
                 </PanelSectionRow>
                 {showFlatpakUpdates && (
@@ -215,7 +228,9 @@ function AutoUpdatePanel() {
               <>
                 <PanelSectionRow>
                   <ButtonItem layout="below" onClick={() => setShowDeckyUpdates(!showDeckyUpdates)}>
-                    {showDeckyUpdates ? "Hide details" : `Show ${state.deckyLastCheck.deckyPluginUpdates.length} updates`}
+                    {showDeckyUpdates
+                      ? "Hide details"
+                      : `Show ${state.deckyLastCheck.deckyPluginUpdates.length} updates`}
                   </ButtonItem>
                 </PanelSectionRow>
                 {showDeckyUpdates && (
@@ -224,7 +239,9 @@ function AutoUpdatePanel() {
                       {state.deckyLastCheck.deckyPluginUpdates.map((u) => (
                         <div key={u.name} style={{ marginBottom: 4 }}>
                           <div>{u.name}</div>
-                          <div style={{ opacity: 0.6 }}>{u.currentVersion} {"\u2192"} {u.newVersion}</div>
+                          <div style={{ opacity: 0.6 }}>
+                            {u.currentVersion} {"\u2192"} {u.newVersion}
+                          </div>
                         </div>
                       ))}
                     </div>

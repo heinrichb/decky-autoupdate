@@ -26,28 +26,11 @@ function mockResult(source: string) {
 
 // Mock all external dependencies before importing the service
 vi.mock("@decky/api", () => ({
-  callable: (name: string) => {
-    // Return mock functions for each backend callable
-    const mocks: Record<string, any> = {
-      get_settings: vi.fn().mockResolvedValue({
-        showNotifications: true,
-        logHistory: true,
-        maxHistoryEntries: 100,
-        steamEnabled: true,
-        steamCheckIntervalMinutes: 30,
-        flatpakEnabled: true,
-        flatpakCheckIntervalMinutes: 720,
-        flatpakAutoApply: true,
-        checkOnWake: true,
-      }),
-      save_settings: vi.fn().mockResolvedValue(true),
-      get_history: vi.fn().mockResolvedValue([]),
-      add_history_entry: vi.fn().mockResolvedValue(true),
-      clear_history: vi.fn().mockResolvedValue(true),
-    };
-    return mocks[name] || vi.fn();
-  },
   toaster: { toast: vi.fn() },
+}));
+
+vi.mock("../deckyApi", () => ({
+  callPluginMethod: vi.fn().mockResolvedValue({}),
 }));
 
 vi.mock("../steamClient", () => ({
@@ -99,17 +82,20 @@ async function getService(settingsOverrides: Record<string, any> = {}) {
 
   // Re-mock before re-importing
   vi.doMock("@decky/api", () => ({
-    callable: (name: string) => {
-      const mocks: Record<string, any> = {
-        get_settings: vi.fn().mockResolvedValue(baseSettings),
-        save_settings: vi.fn().mockResolvedValue(true),
-        get_history: vi.fn().mockResolvedValue([]),
-        add_history_entry: vi.fn().mockResolvedValue(true),
-        clear_history: vi.fn().mockResolvedValue(true),
-      };
-      return mocks[name] || vi.fn();
-    },
     toaster: { toast: vi.fn() },
+  }));
+
+  vi.doMock("../deckyApi", () => ({
+    callPluginMethod: vi.fn().mockImplementation((method: string) => {
+      const mocks: Record<string, any> = {
+        get_settings: baseSettings,
+        save_settings: true,
+        get_history: [],
+        add_history_entry: true,
+        clear_history: true,
+      };
+      return Promise.resolve(mocks[method] ?? {});
+    }),
   }));
 
   vi.doMock("../steamClient", () => ({

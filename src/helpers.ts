@@ -96,13 +96,19 @@ export function formatUpdateSummary(result: {
     : `${label}: ${summary}`;
 }
 
-export function shouldToastResult(level: NotificationLevel, result: { pendingCount: number; forcedCount: number }): boolean {
+export function shouldToastResult(
+  level: NotificationLevel,
+  result: { pendingCount: number; forcedCount: number },
+): boolean {
   if (level === "off") return false;
   if (level === "all") return true;
   return result.pendingCount > 0 || result.forcedCount > 0;
 }
 
-export function combinedToastBody(results: UpdateCheckResult[], level: NotificationLevel = "updates-only"): string | null {
+export function combinedToastBody(
+  results: UpdateCheckResult[],
+  level: NotificationLevel = "updates-only",
+): string | null {
   const filtered = results.filter((r) => shouldToastResult(level, r));
   const parts = filtered.map((r) => formatUpdateSummary(r));
   return parts.length > 0 ? parts.join(" | ") : null;

@@ -59,7 +59,11 @@ let _pluginMethodQueue: Promise<unknown> = Promise.resolve();
 
 export function callPluginMethod<T = unknown>(method: string, timeoutMs?: number): Promise<T>;
 export function callPluginMethod<T = unknown>(method: string, args: unknown[], timeoutMs?: number): Promise<T>;
-export function callPluginMethod<T = unknown>(method: string, argsOrTimeout?: unknown[] | number, maybeTimeout?: number): Promise<T> {
+export function callPluginMethod<T = unknown>(
+  method: string,
+  argsOrTimeout?: unknown[] | number,
+  maybeTimeout?: number,
+): Promise<T> {
   let wsArgs: unknown[];
   let timeoutMs: number;
 
