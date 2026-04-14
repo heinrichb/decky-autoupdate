@@ -1,0 +1,94 @@
+name: Auto Release
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  release:
+    # Skip if this push was from the auto-release bot itself
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check for unreleased changes
+        id: check
+        run: |
+          # Extract content between [Unreleased] and the next ## heading
+          unreleased=$(sed -n '/^## \[Unreleased\]/,/^## \[/{ /^## \[Unreleased\]/d; /^## \[/d; p; }' CHANGELOG.md)
+
+          # Strip blank lines and check if there's actual content
+          content=$(echo "$unreleased" | grep -v '^$' | grep -v '^###' || true)
+          if [ -z "$content" ]; then
+            echo "No unreleased changes found. Skipping release."
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Found unreleased changes."
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Determine version bump
+        if: steps.check.outputs.has_changes == 'true'
+        id: bump
+        run: |
+          # Read current version from package.json
+          current=$(node -p "require('./package.json').version")
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+
+          IFS='.' read -r major minor patch <<< "$current"
+
+          # Check CHANGELOG section headers to determine bump type
+          unreleased=$(sed -n '/^## \[Unreleased\]/,/^## \[/p' CHANGELOG.md)
+
+          if echo "$unreleased" | grep -q '^### Added'; then
+            # New features → minor bump
+            minor=$((minor + 1))
+            patch=0
+          else
+            # Fixes, changes, improvements only → patch bump
+            patch=$((patch + 1))
+          fi
+
+          next="${major}.${minor}.${patch}"
+          echo "next=$next" >> "$GITHUB_OUTPUT"
+          echo "Bumping $current → $next"
+
+      - name: Update version and changelog
+        if: steps.check.outputs.has_changes == 'true'
+        run: |
+          next="${{ steps.bump.outputs.next }}"
+          today=$(date +%Y-%m-%d)
+
+          # Update package.json version
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            pkg.version = '$next';
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+
+          # Update CHANGELOG: replace [Unreleased] with version, add fresh [Unreleased]
+          node -e "
+            const fs = require('fs');
+            let cl = fs.readFileSync('CHANGELOG.md', 'utf8');
+            cl = cl.replace('## [Unreleased]', '## [Unreleased]\n\n## [$next] - $today');
+            fs.writeFileSync('CHANGELOG.md', cl);
+          "
+
+      - name: Commit and tag
+        if: steps.check.outputs.has_changes == 'true'
+        run: |
+          next="${{ steps.bump.outputs.next }}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add package.json CHANGELOG.md
+          git commit -m "release: v${next} [skip ci]"
+          git tag "v${next}"
+          git push origin main --follow-tags

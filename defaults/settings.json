@@ -1,0 +1,12 @@
+{
+  "notificationLevel": "updates-only",
+  "debugLogging": false,
+  "logHistory": true,
+  "maxHistoryEntries": 100,
+  "steamEnabled": true,
+  "steamCheckIntervalMinutes": 30,
+  "flatpakEnabled": true,
+  "flatpakCheckIntervalMinutes": 360,
+  "flatpakAutoApply": true,
+  "checkOnWake": true
+}
