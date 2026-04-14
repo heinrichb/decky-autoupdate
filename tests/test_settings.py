@@ -64,7 +64,7 @@ class TestValidateSettings(unittest.TestCase):
         This is the exact bug where checkOnWake was undefined."""
         p = make_plugin()
         saved = {
-            "showNotifications": True,
+            "notificationLevel": "updates-only",
             "logHistory": True,
             "maxHistoryEntries": 100,
             "steamEnabled": True,
@@ -105,7 +105,7 @@ class TestValidateSettings(unittest.TestCase):
             "steamEnabled": True,
             "flatpakEnabled": False,
             "checkOnWake": True,
-            "showNotifications": False,
+            "notificationLevel": "off",
             "checkOnGameClose": True,
             "checkDuringGameplay": False,
         }
@@ -113,7 +113,7 @@ class TestValidateSettings(unittest.TestCase):
         self.assertIs(result["steamEnabled"], True)
         self.assertIs(result["flatpakEnabled"], False)
         self.assertIs(result["checkOnWake"], True)
-        self.assertIs(result["showNotifications"], False)
+        self.assertEqual(result["notificationLevel"], "off")
         self.assertIs(result["checkOnGameClose"], True)
         self.assertIs(result["checkDuringGameplay"], False)
 
@@ -218,6 +218,70 @@ class TestValidateSettings(unittest.TestCase):
         loaded = json.loads(json_str)
         round_tripped = p._validate_settings(loaded)
         self.assertEqual(round_tripped, validated)
+
+
+    # ── notificationLevel migration and enum validation ──
+
+    def test_migrate_showNotifications_true_to_updates_only(self):
+        """Legacy showNotifications=True should become notificationLevel='updates-only'."""
+        p = make_plugin()
+        result = p._validate_settings({"showNotifications": True})
+        self.assertEqual(result["notificationLevel"], "updates-only")
+        self.assertNotIn("showNotifications", result)
+
+    def test_migrate_showNotifications_false_to_off(self):
+        """Legacy showNotifications=False should become notificationLevel='off'."""
+        p = make_plugin()
+        result = p._validate_settings({"showNotifications": False})
+        self.assertEqual(result["notificationLevel"], "off")
+        self.assertNotIn("showNotifications", result)
+
+    def test_no_migration_when_notificationLevel_already_set(self):
+        """If both showNotifications and notificationLevel exist, keep notificationLevel."""
+        p = make_plugin()
+        result = p._validate_settings({
+            "showNotifications": False,
+            "notificationLevel": "all",
+        })
+        self.assertEqual(result["notificationLevel"], "all")
+
+    def test_invalid_notificationLevel_reverts_to_default(self):
+        """Invalid enum value should revert to default."""
+        p = make_plugin()
+        result = p._validate_settings({"notificationLevel": "invalid"})
+        self.assertEqual(result["notificationLevel"], "updates-only")
+
+    def test_valid_notificationLevel_values(self):
+        """All valid enum values should be accepted."""
+        p = make_plugin()
+        for level in ("off", "updates-only", "all"):
+            result = p._validate_settings({"notificationLevel": level})
+            self.assertEqual(result["notificationLevel"], level)
+
+    def test_debugLogging_defaults_to_false(self):
+        p = make_plugin()
+        result = p._validate_settings({})
+        self.assertIs(result["debugLogging"], False)
+
+    def test_debugLogging_accepts_boolean(self):
+        p = make_plugin()
+        result = p._validate_settings({"debugLogging": True})
+        self.assertIs(result["debugLogging"], True)
+
+    def test_debugLogging_rejects_non_boolean(self):
+        p = make_plugin()
+        result = p._validate_settings({"debugLogging": "yes"})
+        self.assertIs(result["debugLogging"], False)
+
+    def test_decky_interval_clamping(self):
+        """Decky and SteamOS intervals should be clamped."""
+        p = make_plugin()
+        result = p._validate_settings({
+            "deckyCheckIntervalMinutes": 10,
+            "steamosCheckIntervalMinutes": 5000,
+        })
+        self.assertEqual(result["deckyCheckIntervalMinutes"], 60)
+        self.assertEqual(result["steamosCheckIntervalMinutes"], 2880)
 
 
 if __name__ == "__main__":

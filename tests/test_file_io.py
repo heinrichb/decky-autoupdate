@@ -150,7 +150,7 @@ class TestDefaultSettings(unittest.TestCase):
         self.assertEqual(defaults["steamCheckIntervalMinutes"], 60)
         # Still present from hardcoded (the bug we fixed)
         self.assertIs(defaults["checkOnWake"], True)
-        self.assertIs(defaults["showNotifications"], True)
+        self.assertEqual(defaults["notificationLevel"], "updates-only")
 
     def test_stale_file_missing_new_field(self):
         """A stale defaults file missing a new field should still include it from hardcoded."""
@@ -158,7 +158,7 @@ class TestDefaultSettings(unittest.TestCase):
         os.makedirs(defaults_dir)
         # Simulate an old defaults file that predates checkOnWake
         old_defaults = {
-            "showNotifications": True,
+            "notificationLevel": "updates-only",
             "logHistory": True,
             "maxHistoryEntries": 100,
             "steamEnabled": True,
@@ -194,7 +194,8 @@ class TestDefaultSettings(unittest.TestCase):
         decky_stub.DECKY_PLUGIN_DIR = "/nonexistent"  # force hardcoded path
         defaults = p._default_settings()
         expected_keys = {
-            "showNotifications", "logHistory", "maxHistoryEntries",
+            "notificationLevel", "debugLogging",
+            "logHistory", "maxHistoryEntries",
             "steamEnabled", "steamCheckIntervalMinutes",
             "flatpakEnabled", "flatpakCheckIntervalMinutes",
             "flatpakAutoApply", "checkOnWake",

@@ -5,10 +5,10 @@ const mockCallPluginMethod = vi.fn();
 vi.mock("../deckyApi", () => ({
   callPluginMethod: (...args: unknown[]) => mockCallPluginMethod(...args),
   isDeckyAvailable: vi.fn(),
-  findPluginUpdates: vi.fn(),
-  installPluginsAndConfirm: vi.fn(),
-  checkDeckyLoaderUpdate: vi.fn(),
-  applyDeckyLoaderUpdate: vi.fn(),
+  findPluginUpdates: (...args: unknown[]) => mockFindPluginUpdates(...args),
+  installPluginsAndConfirm: (...args: unknown[]) => mockInstallPluginsAndConfirm(...args),
+  checkDeckyLoaderUpdate: (...args: unknown[]) => mockCheckDeckyLoaderUpdate(...args),
+  applyDeckyLoaderUpdate: (...args: unknown[]) => mockApplyDeckyLoaderUpdate(...args),
 }));
 
 vi.mock("../steamClient", () => ({
@@ -18,8 +18,20 @@ vi.mock("../steamClient", () => ({
 // providers.ts no longer imports from @decky/api, but mock it in case
 vi.mock("@decky/api", () => ({}));
 
-import { checkFlatpakOnly, applyFlatpak, isFlatpakAvailable } from "../providers";
+import {
+  checkFlatpakOnly,
+  applyFlatpak,
+  isFlatpakAvailable,
+  applyDeckyPluginUpdates,
+  checkAndApplyDeckyLoaderUpdate,
+  checkAndApplySteamos,
+} from "../providers";
 import { FlatpakUpdate } from "../types";
+
+const mockFindPluginUpdates = vi.fn();
+const mockInstallPluginsAndConfirm = vi.fn();
+const mockCheckDeckyLoaderUpdate = vi.fn();
+const mockApplyDeckyLoaderUpdate = vi.fn();
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -188,5 +200,128 @@ describe("isFlatpakAvailable", () => {
     const { isFlatpakAvailable: freshCheck } = await import("../providers");
     const result = await freshCheck();
     expect(result).toBe(false);
+  });
+});
+
+// ── Decky plugin updates ──────────────────────────────────
+
+describe("applyDeckyPluginUpdates", () => {
+  it("returns empty result when no updates available", async () => {
+    mockFindPluginUpdates.mockResolvedValue({ updates: [], details: [] });
+
+    const result = await applyDeckyPluginUpdates([]);
+    expect(result.source).toBe("decky");
+    expect(result.pendingCount).toBe(0);
+    expect(result.errors).toEqual([]);
+  });
+
+  it("installs updates and returns counts", async () => {
+    mockFindPluginUpdates.mockResolvedValue({
+      updates: [{ name: "PluginA", artifact: "url", version: "2.0", hash: "abc", install_type: 2 }],
+      details: [{ name: "PluginA", currentVersion: "1.0", newVersion: "2.0" }],
+    });
+    mockInstallPluginsAndConfirm.mockResolvedValue(undefined);
+
+    const result = await applyDeckyPluginUpdates([]);
+    expect(result.pendingCount).toBe(1);
+    expect(result.forcedCount).toBe(1);
+    expect(result.deckyPluginUpdates[0].name).toBe("PluginA");
+  });
+
+  it("returns error when install fails", async () => {
+    mockFindPluginUpdates.mockRejectedValue(new Error("store unreachable"));
+
+    const result = await applyDeckyPluginUpdates([]);
+    expect(result.errors).toEqual(["store unreachable"]);
+    expect(result.pendingCount).toBe(0);
+  });
+});
+
+// ── Decky Loader updates ──────────────────────────────────
+
+describe("checkAndApplyDeckyLoaderUpdate", () => {
+  it("returns empty result when no update available", async () => {
+    mockCheckDeckyLoaderUpdate.mockResolvedValue({
+      hasUpdate: false,
+      currentVersion: "3.0.0",
+      remoteVersion: "",
+    });
+
+    const result = await checkAndApplyDeckyLoaderUpdate();
+    expect(result.source).toBe("decky-loader");
+    expect(result.pendingCount).toBe(0);
+  });
+
+  it("applies update when available", async () => {
+    mockCheckDeckyLoaderUpdate.mockResolvedValue({
+      hasUpdate: true,
+      currentVersion: "3.0.0",
+      remoteVersion: "3.1.0",
+    });
+    mockApplyDeckyLoaderUpdate.mockResolvedValue(undefined);
+
+    const result = await checkAndApplyDeckyLoaderUpdate();
+    expect(result.pendingCount).toBe(1);
+    expect(result.forcedCount).toBe(1);
+    expect(result.deckyPluginUpdates[0].newVersion).toBe("3.1.0");
+  });
+
+  it("returns error when update fails", async () => {
+    mockCheckDeckyLoaderUpdate.mockRejectedValue(new Error("WS timeout"));
+
+    const result = await checkAndApplyDeckyLoaderUpdate();
+    expect(result.errors).toEqual(["WS timeout"]);
+  });
+});
+
+// ── SteamOS updates ───────────────────────────────────────
+
+describe("checkAndApplySteamos", () => {
+  it("returns empty result when no update available", async () => {
+    mockCallPluginMethod.mockImplementation((method: string) => {
+      if (method === "check_steamos_updates")
+        return Promise.resolve({ success: true, hasUpdate: false, buildId: "", needsReboot: false, error: "" });
+      return Promise.resolve({});
+    });
+
+    const result = await checkAndApplySteamos();
+    expect(result.source).toBe("steamos");
+    expect(result.pendingCount).toBe(0);
+  });
+
+  it("returns staged result when reboot needed", async () => {
+    mockCallPluginMethod.mockImplementation((method: string) => {
+      if (method === "check_steamos_updates")
+        return Promise.resolve({ success: true, hasUpdate: false, buildId: "", needsReboot: true, error: "" });
+      return Promise.resolve({});
+    });
+
+    const result = await checkAndApplySteamos();
+    expect(result.pendingCount).toBe(1);
+    expect(result.forcedCount).toBe(1);
+  });
+
+  it("returns error when check fails", async () => {
+    mockCallPluginMethod.mockImplementation((method: string) => {
+      if (method === "check_steamos_updates")
+        return Promise.resolve({
+          success: false,
+          hasUpdate: false,
+          buildId: "",
+          needsReboot: false,
+          error: "not found",
+        });
+      return Promise.resolve({});
+    });
+
+    const result = await checkAndApplySteamos();
+    expect(result.errors).toEqual(["not found"]);
+  });
+
+  it("returns error when IPC fails entirely", async () => {
+    mockCallPluginMethod.mockRejectedValue(new Error("WS closed"));
+
+    const result = await checkAndApplySteamos();
+    expect(result.errors).toEqual(["WS closed"]);
   });
 });

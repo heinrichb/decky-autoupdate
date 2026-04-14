@@ -3,7 +3,19 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { formatBytes, statusColor, flatpakStatusLabel, deckyStatusLabel, triggerLabel, sourceLabel } from "../helpers";
+import {
+  formatBytes,
+  statusColor,
+  flatpakStatusLabel,
+  deckyStatusLabel,
+  triggerLabel,
+  sourceLabel,
+  shouldToastResult,
+  combinedToastBody,
+  compactStatusText,
+  formatUpdateSummary,
+} from "../helpers";
+import { UpdateCheckResult, emptyResult } from "../types";
 
 describe("formatBytes", () => {
   it("returns em dash for 0", () => {
@@ -125,5 +137,149 @@ describe("deckyStatusLabel", () => {
 
   it("returns default label for idle", () => {
     expect(deckyStatusLabel("idle")).toBe("Check Plugins");
+  });
+});
+
+// ── shouldToastResult ─────────────────────────────────────
+
+describe("shouldToastResult", () => {
+  it("returns false when level is off, regardless of result", () => {
+    expect(shouldToastResult("off", { pendingCount: 5, forcedCount: 3 })).toBe(false);
+  });
+
+  it("returns true when level is all, even with no updates", () => {
+    expect(shouldToastResult("all", { pendingCount: 0, forcedCount: 0 })).toBe(true);
+  });
+
+  it("returns true for updates-only when updates are pending", () => {
+    expect(shouldToastResult("updates-only", { pendingCount: 3, forcedCount: 0 })).toBe(true);
+  });
+
+  it("returns true for updates-only when updates were applied", () => {
+    expect(shouldToastResult("updates-only", { pendingCount: 0, forcedCount: 2 })).toBe(true);
+  });
+
+  it("returns false for updates-only when nothing found", () => {
+    expect(shouldToastResult("updates-only", { pendingCount: 0, forcedCount: 0 })).toBe(false);
+  });
+});
+
+// ── combinedToastBody ─────────────────────────────────────
+
+describe("combinedToastBody", () => {
+  const withUpdates: UpdateCheckResult = {
+    ...emptyResult("flatpak"),
+    pendingCount: 3,
+  };
+  const noUpdates: UpdateCheckResult = emptyResult("steam");
+
+  it("returns null when level is off", () => {
+    expect(combinedToastBody([withUpdates], "off")).toBeNull();
+  });
+
+  it("returns null for updates-only when no source has updates", () => {
+    expect(combinedToastBody([noUpdates], "updates-only")).toBeNull();
+  });
+
+  it("returns body for updates-only when a source has updates", () => {
+    const body = combinedToastBody([noUpdates, withUpdates], "updates-only");
+    expect(body).not.toBeNull();
+    expect(body).toContain("Flatpak");
+    expect(body).not.toContain("Steam");
+  });
+
+  it("includes all sources when level is all", () => {
+    const body = combinedToastBody([noUpdates, withUpdates], "all");
+    expect(body).toContain("Steam");
+    expect(body).toContain("Flatpak");
+  });
+
+  it("returns null for empty results array", () => {
+    expect(combinedToastBody([], "all")).toBeNull();
+  });
+});
+
+// ── compactStatusText ─────────────────────────────────────
+
+describe("compactStatusText", () => {
+  it("returns 'Never checked' when lastCheck is null", () => {
+    expect(compactStatusText("steam", null)).toBe("Never checked");
+  });
+
+  it("returns error message when errors exist", () => {
+    const result = { ...emptyResult("flatpak"), errors: ["connection refused"] };
+    expect(compactStatusText("flatpak", result)).toBe("connection refused");
+  });
+
+  it("truncates long error messages to 50 chars", () => {
+    const longError = "a".repeat(60);
+    const result = { ...emptyResult("flatpak"), errors: [longError] };
+    const text = compactStatusText("flatpak", result);
+    expect(text.length).toBeLessThanOrEqual(50);
+    expect(text).toContain("...");
+  });
+
+  it("does not truncate errors under 50 chars", () => {
+    const shortError = "timeout after 30s";
+    const result = { ...emptyResult("flatpak"), errors: [shortError] };
+    expect(compactStatusText("flatpak", result)).toBe(shortError);
+  });
+
+  it("returns 'Up to date' when no updates and no errors", () => {
+    expect(compactStatusText("steam", emptyResult("steam"))).toBe("Up to date");
+  });
+
+  it("returns pending count when updates available", () => {
+    const result = { ...emptyResult("flatpak"), pendingCount: 5 };
+    expect(compactStatusText("flatpak", result)).toContain("5");
+    expect(compactStatusText("flatpak", result)).toContain("available");
+  });
+
+  it("returns applied count when updates were applied", () => {
+    const result = { ...emptyResult("decky"), pendingCount: 3, forcedCount: 3 };
+    expect(compactStatusText("decky", result)).toContain("3 of 3");
+    expect(compactStatusText("decky", result)).toContain("applied");
+  });
+
+  it("returns staged message for SteamOS when forcedCount > 0", () => {
+    const result = { ...emptyResult("steamos"), pendingCount: 1, forcedCount: 1 };
+    expect(compactStatusText("steamos", result)).toContain("Staged");
+    expect(compactStatusText("steamos", result)).toContain("reboot");
+  });
+
+  it("does NOT return staged message for non-SteamOS sources with forcedCount", () => {
+    const result = { ...emptyResult("flatpak"), pendingCount: 2, forcedCount: 2 };
+    expect(compactStatusText("flatpak", result)).not.toContain("Staged");
+  });
+});
+
+// ── formatUpdateSummary ───────────────────────────────────
+
+describe("formatUpdateSummary", () => {
+  it("shows 'checked, no updates' when nothing found", () => {
+    expect(formatUpdateSummary({ source: "steam", pendingCount: 0, forcedCount: 0 })).toContain("no updates");
+  });
+
+  it("shows available count when updates pending", () => {
+    const text = formatUpdateSummary({ source: "flatpak", pendingCount: 4, forcedCount: 0 });
+    expect(text).toContain("4");
+    expect(text).toContain("available");
+  });
+
+  it("shows applied count when updates were applied", () => {
+    const text = formatUpdateSummary({ source: "decky", pendingCount: 2, forcedCount: 2 });
+    expect(text).toContain("2 of 2");
+    expect(text).toContain("applied");
+  });
+
+  it("uses singular 'update' for count of 1", () => {
+    const text = formatUpdateSummary({ source: "steam", pendingCount: 1, forcedCount: 0 });
+    expect(text).toContain("1 update available");
+    expect(text).not.toContain("updates");
+  });
+
+  it("includes source label", () => {
+    const text = formatUpdateSummary({ source: "flatpak", pendingCount: 1, forcedCount: 0 });
+    expect(text).toContain("Flatpak");
   });
 });
