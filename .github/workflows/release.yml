@@ -42,7 +42,7 @@ jobs:
       - name: Package plugin
         run: |
           mkdir -p release/AutoUpdate
-          cp -r dist plugin.json package.json main.py defaults LICENSE README.md release/AutoUpdate/
+          cp -r dist assets plugin.json package.json main.py defaults LICENSE README.md release/AutoUpdate/
           cd release && zip -r ../AutoUpdate-${{ github.ref_name }}.zip AutoUpdate/
 
       - name: Create GitHub Release

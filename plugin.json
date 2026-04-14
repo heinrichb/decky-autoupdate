@@ -4,8 +4,8 @@
   "flags": ["root"],
   "api_version": 2,
   "publish": {
-    "tags": ["utility", "downloads", "updates", "flatpak"],
-    "description": "Automatically keeps Steam games and Flatpak apps up to date — force-starts pending downloads and applies Flatpak updates in the background.",
+    "tags": ["utility", "downloads", "updates", "flatpak", "steamos", "decky"],
+    "description": "All-in-one auto-updater for Steam Deck — manages Steam game downloads, Flatpak apps, Decky plugins, Decky Loader, and SteamOS system updates.",
     "image": "https://raw.githubusercontent.com/heinrichb/decky-autoupdate/main/assets/icon.png"
   }
 }
