@@ -49,7 +49,7 @@ export async function isFlatpakAvailable(): Promise<boolean> {
     return result;
   } catch (e) {
     debug("isFlatpakAvailable: failed:", errorMessage(e));
-    // Don't cache failures — allow retry on next call
+    // Don't cache IPC errors — allow retry on next call
     return false;
   }
 }

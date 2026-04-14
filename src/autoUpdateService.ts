@@ -267,32 +267,21 @@ class AutoUpdateService {
 
   async triggerAll(trigger: Trigger = "manual"): Promise<UpdateCheckResult[]> {
     const s = this.state.settings;
-    const sources: UpdateSource[] = [];
-    const promises: Promise<UpdateCheckResult>[] = [];
+    const checks: { source: UpdateSource; promise: Promise<UpdateCheckResult> }[] = [];
 
-    if (s.steamEnabled && this.state.steamReady) {
-      sources.push("steam");
-      promises.push(this.runCheck("steam", trigger));
-    }
-    if (s.flatpakEnabled && this.state.flatpakAvailable) {
-      sources.push("flatpak");
-      promises.push(this.runCheck("flatpak", trigger));
-    }
-    if (s.deckyPluginUpdatesEnabled && this.state.deckyAvailable) {
-      sources.push("decky");
-      promises.push(this.runCheck("decky", trigger));
-    }
-    if (s.deckyLoaderUpdateEnabled && this.state.deckyAvailable) {
-      sources.push("decky-loader");
-      promises.push(this.runCheck("decky-loader", trigger));
-    }
-    if (s.steamosUpdateEnabled && this.state.steamosAvailable) {
-      sources.push("steamos");
-      promises.push(this.runCheck("steamos", trigger));
-    }
+    if (s.steamEnabled && this.state.steamReady)
+      checks.push({ source: "steam", promise: this.runCheck("steam", trigger) });
+    if (s.flatpakEnabled && this.state.flatpakAvailable)
+      checks.push({ source: "flatpak", promise: this.runCheck("flatpak", trigger) });
+    if (s.deckyPluginUpdatesEnabled && this.state.deckyAvailable)
+      checks.push({ source: "decky", promise: this.runCheck("decky", trigger) });
+    if (s.deckyLoaderUpdateEnabled && this.state.deckyAvailable)
+      checks.push({ source: "decky-loader", promise: this.runCheck("decky-loader", trigger) });
+    if (s.steamosUpdateEnabled && this.state.steamosAvailable)
+      checks.push({ source: "steamos", promise: this.runCheck("steamos", trigger) });
 
-    debug(`triggerAll(${trigger}): checking [${sources.join(", ")}]`);
-    return Promise.all(promises);
+    debug(`triggerAll(${trigger}): [${checks.map((c) => c.source).join(", ")}]`);
+    return Promise.all(checks.map((c) => c.promise));
   }
 
   async clearHistory() {

@@ -74,22 +74,26 @@ function pluralUpdates(n: number): string {
   return `update${n === 1 ? "" : "s"}`;
 }
 
+function updateSummaryCore(pendingCount: number, forcedCount: number): string {
+  if (forcedCount > 0 && pendingCount > 0) {
+    return `${forcedCount} of ${pendingCount} ${pluralUpdates(pendingCount)} applied`;
+  }
+  if (pendingCount > 0) {
+    return `${pendingCount} ${pluralUpdates(pendingCount)} available`;
+  }
+  return "Up to date";
+}
+
 export function formatUpdateSummary(result: {
   source: UpdateSource;
   pendingCount: number;
   forcedCount: number;
 }): string {
   const label = sourceLabel(result.source);
-
-  if (result.forcedCount > 0 && result.pendingCount > 0) {
-    return `${label}: ${result.forcedCount} of ${result.pendingCount} ${pluralUpdates(result.pendingCount)} applied`;
-  }
-
-  if (result.pendingCount > 0) {
-    return `${label}: ${result.pendingCount} ${pluralUpdates(result.pendingCount)} available`;
-  }
-
-  return `${label}: checked, no updates`;
+  const summary = updateSummaryCore(result.pendingCount, result.forcedCount);
+  return result.pendingCount === 0 && result.forcedCount === 0
+    ? `${label}: checked, no updates`
+    : `${label}: ${summary}`;
 }
 
 export function shouldToastResult(level: NotificationLevel, result: { pendingCount: number; forcedCount: number }): boolean {
@@ -124,11 +128,16 @@ export function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }
 
+export const COLOR_SUCCESS = "#2a9d8f";
+export const COLOR_WARNING = "#fca311";
+export const COLOR_ERROR = "#e63946";
+export const COLOR_MUTED = "#888";
+
 export function statusColor(result: { errors: string[]; pendingCount: number } | null): string {
-  if (!result) return "#888";
-  if (result.errors.length > 0) return "#e63946";
-  if (result.pendingCount > 0) return "#fca311";
-  return "#2a9d8f";
+  if (!result) return COLOR_MUTED;
+  if (result.errors.length > 0) return COLOR_ERROR;
+  if (result.pendingCount > 0) return COLOR_WARNING;
+  return COLOR_SUCCESS;
 }
 
 function sourceStatusLabel(status: SourceStatus, applyingText: string, defaultText: string): string {
@@ -151,13 +160,24 @@ export function flatpakStatusLabel(status: SourceStatus): string {
 }
 
 export function deckyStatusLabel(status: SourceStatus): string {
-  return sourceStatusLabel(status, "Updating plugins...", "Check Decky");
+  return sourceStatusLabel(status, "Updating plugins...", "Check Plugins");
 }
 
 export function deckyLoaderStatusLabel(status: SourceStatus): string {
-  return sourceStatusLabel(status, "Updating Decky Loader...", "Check Decky Loader");
+  return sourceStatusLabel(status, "Updating Decky...", "Check Decky");
 }
 
 export function steamosStatusLabel(status: SourceStatus): string {
   return sourceStatusLabel(status, "Downloading SteamOS update...", "Check SteamOS");
+}
+
+export function compactStatusText(source: UpdateSource, lastCheck: UpdateCheckResult | null): string {
+  if (!lastCheck) return "Never checked";
+  if (lastCheck.errors.length > 0) {
+    const msg = lastCheck.errors[0];
+    return msg.length > 50 ? msg.slice(0, 47) + "..." : msg;
+  }
+  // SteamOS "staged" is a special post-apply state
+  if (source === "steamos" && lastCheck.forcedCount > 0) return "Staged \u2014 reboot when ready";
+  return updateSummaryCore(lastCheck.pendingCount, lastCheck.forcedCount);
 }

@@ -1,13 +1,14 @@
 import { definePlugin, toaster } from "@decky/api";
 import { ButtonItem, DropdownItem, PanelSection, PanelSectionRow, SliderField, ToggleField } from "@decky/ui";
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, ReactNode } from "react";
 import { MdUpdate } from "react-icons/md";
 import { service, ServiceState } from "./autoUpdateService";
 import { getInstalledPlugins, InstalledPlugin } from "./deckyApi";
-import type { NotificationLevel } from "./types";
+import type { NotificationLevel, UpdateSource, UpdateCheckResult } from "./types";
 import {
   formatBytes,
   statusColor,
+  compactStatusText,
   steamStatusLabel,
   flatpakStatusLabel,
   deckyStatusLabel,
@@ -19,6 +20,8 @@ import {
   triggerLabel,
   sourceLabel,
   logError,
+  COLOR_WARNING,
+  COLOR_SUCCESS,
 } from "./helpers";
 
 function useServiceState(): ServiceState {
@@ -31,6 +34,8 @@ function useServiceState(): ServiceState {
 
   return service.getState();
 }
+
+const DETAIL_LIST_STYLE = { fontSize: "0.8em", opacity: 0.7, maxHeight: 200, overflowY: "auto" as const };
 
 const NOTIFICATION_OPTIONS = [
   { data: "off" as NotificationLevel, label: "Off" },
@@ -78,11 +83,30 @@ function AutoUpdatePanel() {
     settings.steamosUpdateEnabled && state.steamosAvailable,
   ].filter(Boolean).length;
 
+  const statusDesc = (source: UpdateSource, lastCheck: UpdateCheckResult | null, warning?: string): ReactNode => {
+    const text = warning || compactStatusText(source, lastCheck);
+    const color = warning ? COLOR_WARNING : statusColor(lastCheck);
+    const time = lastCheck ? new Date(lastCheck.timestamp).toLocaleTimeString() : "";
+    return (
+      <span style={{ color }}>
+        {text}
+        {time ? <span style={{ opacity: 0.5 }}> {"\u00b7"} {time}</span> : null}
+      </span>
+    );
+  };
+
+  const handleCheck = async (source: UpdateSource) => {
+    const result = await service.triggerCheck(source, "manual");
+    if (shouldToastResult(settings.notificationLevel, result)) {
+      toaster.toast({ title: `${sourceLabel(source)} Updates`, body: formatUpdateSummary(result) });
+    }
+  };
+
   return (
     <>
-      {/* ── Check All ──────────────────────────── */}
-      {enabledSourceCount >= 2 && (
-        <PanelSection>
+      {/* ── Status ─────────────────────────────── */}
+      <PanelSection title="Status">
+        {enabledSourceCount >= 2 && (
           <PanelSectionRow>
             <ButtonItem
               layout="below"
@@ -91,312 +115,161 @@ function AutoUpdatePanel() {
                 const results = await service.triggerAll("manual");
                 if (settings.notificationLevel !== "off") {
                   const body = combinedToastBody(results, settings.notificationLevel);
-                  if (body) {
-                    toaster.toast({ title: "AutoUpdate", body });
-                  }
+                  if (body) toaster.toast({ title: "AutoUpdate", body });
                 }
               }}
             >
               {anyChecking ? "Checking..." : "Check All"}
             </ButtonItem>
           </PanelSectionRow>
-        </PanelSection>
-      )}
+        )}
 
-      {/* ── Steam Status ───────────────────────── */}
-      {settings.steamEnabled && (
-        <PanelSection title="Steam Updates">
-          <PanelSectionRow>
-            <div style={{ fontSize: "0.85em", opacity: 0.8 }}>
-              {!state.steamReady && <div style={{ color: "#fca311", marginBottom: 4 }}>SteamClient not available</div>}
-              <div>
-                Last check:{" "}
-                {state.steamLastCheck ? new Date(state.steamLastCheck.timestamp).toLocaleTimeString() : "Never"}
-              </div>
-              {state.steamLastCheck && (
-                <div style={{ color: statusColor(state.steamLastCheck) }}>
-                  {state.steamLastCheck.pendingCount === 0
-                    ? "All games up to date"
-                    : `${state.steamLastCheck.pendingCount} pending, ${state.steamLastCheck.forcedCount} forced`}
-                </div>
-              )}
-              {state.steamLastCheck?.errors.length ? (
-                <div style={{ color: "#e63946", marginTop: 2 }}>{state.steamLastCheck.errors[0]}</div>
-              ) : null}
-            </div>
-          </PanelSectionRow>
-
-          {state.steamLastCheck && state.steamLastCheck.updates.length > 0 && (
+        {settings.steamEnabled && (
+          <>
             <PanelSectionRow>
-              <ButtonItem layout="below" onClick={() => setShowSteamUpdates(!showSteamUpdates)}>
-                {showSteamUpdates ? "Hide details" : `Show ${state.steamLastCheck.updates.length} updates`}
+              <ButtonItem
+                label="Steam"
+                description={statusDesc("steam", state.steamLastCheck, !state.steamReady ? "SteamClient unavailable" : undefined)}
+                layout="inline"
+                disabled={steamBusy}
+                onClick={() => handleCheck("steam")}
+              >
+                {steamStatusLabel(state.steamStatus)}
               </ButtonItem>
             </PanelSectionRow>
-          )}
-
-          {showSteamUpdates && state.steamLastCheck && state.steamLastCheck.updates.length > 0 && (
-            <PanelSectionRow>
-              <div style={{ fontSize: "0.8em", opacity: 0.7, maxHeight: 200, overflowY: "auto" }}>
-                {state.steamLastCheck.updates.map((u) => (
-                  <div key={u.appId} style={{ marginBottom: 4 }}>
-                    <div>{u.name}</div>
-                    <div style={{ opacity: 0.6 }}>
-                      {u.state} {"\u2014"} {formatBytes(u.bytesToDownload)}
+            {state.steamLastCheck && state.steamLastCheck.updates.length > 0 && (
+              <>
+                <PanelSectionRow>
+                  <ButtonItem layout="below" onClick={() => setShowSteamUpdates(!showSteamUpdates)}>
+                    {showSteamUpdates ? "Hide details" : `Show ${state.steamLastCheck.updates.length} updates`}
+                  </ButtonItem>
+                </PanelSectionRow>
+                {showSteamUpdates && (
+                  <PanelSectionRow>
+                    <div style={DETAIL_LIST_STYLE}>
+                      {state.steamLastCheck.updates.map((u) => (
+                        <div key={u.appId} style={{ marginBottom: 4 }}>
+                          <div>{u.name}</div>
+                          <div style={{ opacity: 0.6 }}>{u.state} {"\u2014"} {formatBytes(u.bytesToDownload)}</div>
+                        </div>
+                      ))}
                     </div>
-                  </div>
-                ))}
-              </div>
-            </PanelSectionRow>
-          )}
+                  </PanelSectionRow>
+                )}
+              </>
+            )}
+          </>
+        )}
 
-          <PanelSectionRow>
-            <ButtonItem
-              layout="below"
-              disabled={steamBusy}
-              onClick={async () => {
-                const result = await service.triggerCheck("steam", "manual");
-                if (shouldToastResult(settings.notificationLevel, result)) {
-                  toaster.toast({
-                    title: `${sourceLabel("steam")} Updates`,
-                    body: formatUpdateSummary(result),
-                  });
-                }
-              }}
-            >
-              {steamStatusLabel(state.steamStatus)}
-            </ButtonItem>
-          </PanelSectionRow>
-        </PanelSection>
-      )}
-
-      {/* ── Flatpak Status ─────────────────────── */}
-      {state.flatpakAvailable && settings.flatpakEnabled && (
-        <PanelSection title="Flatpak Updates">
-          <PanelSectionRow>
-            <div style={{ fontSize: "0.85em", opacity: 0.8 }}>
-              <div>
-                Last check:{" "}
-                {state.flatpakLastCheck ? new Date(state.flatpakLastCheck.timestamp).toLocaleTimeString() : "Never"}
-              </div>
-              {state.flatpakLastCheck && (
-                <div style={{ color: statusColor(state.flatpakLastCheck) }}>
-                  {state.flatpakLastCheck.errors.length > 0
-                    ? "Check failed"
-                    : state.flatpakLastCheck.pendingCount === 0
-                      ? "All apps up to date"
-                      : `${state.flatpakLastCheck.pendingCount} available, ${state.flatpakLastCheck.forcedCount} applied`}
-                </div>
-              )}
-              {state.flatpakLastCheck?.errors.length ? (
-                <div style={{ color: "#e63946", marginTop: 2 }}>{state.flatpakLastCheck.errors[0]}</div>
-              ) : null}
-            </div>
-          </PanelSectionRow>
-
-          {state.flatpakLastCheck && state.flatpakLastCheck.flatpakUpdates.length > 0 && (
+        {state.flatpakAvailable && settings.flatpakEnabled && (
+          <>
             <PanelSectionRow>
-              <ButtonItem layout="below" onClick={() => setShowFlatpakUpdates(!showFlatpakUpdates)}>
-                {showFlatpakUpdates ? "Hide details" : `Show ${state.flatpakLastCheck.flatpakUpdates.length} updates`}
+              <ButtonItem
+                label="Flatpak"
+                description={statusDesc("flatpak", state.flatpakLastCheck)}
+                layout="inline"
+                disabled={flatpakBusy}
+                onClick={() => handleCheck("flatpak")}
+              >
+                {flatpakStatusLabel(state.flatpakStatus)}
               </ButtonItem>
             </PanelSectionRow>
-          )}
-
-          {showFlatpakUpdates && state.flatpakLastCheck && state.flatpakLastCheck.flatpakUpdates.length > 0 && (
-            <PanelSectionRow>
-              <div style={{ fontSize: "0.8em", opacity: 0.7, maxHeight: 200, overflowY: "auto" }}>
-                {state.flatpakLastCheck.flatpakUpdates.map((u) => (
-                  <div key={u.id} style={{ marginBottom: 4 }}>
-                    <div>{u.name}</div>
-                    <div style={{ opacity: 0.6 }}>{u.downloadSize}</div>
-                  </div>
-                ))}
-              </div>
-            </PanelSectionRow>
-          )}
-
-          <PanelSectionRow>
-            <ButtonItem
-              layout="below"
-              disabled={flatpakBusy}
-              onClick={async () => {
-                const result = await service.triggerCheck("flatpak", "manual");
-                if (shouldToastResult(settings.notificationLevel, result)) {
-                  toaster.toast({
-                    title: `${sourceLabel("flatpak")} Updates`,
-                    body: formatUpdateSummary(result),
-                  });
-                }
-              }}
-            >
-              {flatpakStatusLabel(state.flatpakStatus)}
-            </ButtonItem>
-          </PanelSectionRow>
-        </PanelSection>
-      )}
-
-      {/* ── Decky Plugin Status ────────────────── */}
-      {state.deckyAvailable && settings.deckyPluginUpdatesEnabled && (
-        <PanelSection title="Decky Plugins">
-          <PanelSectionRow>
-            <div style={{ fontSize: "0.85em", opacity: 0.8 }}>
-              <div>
-                Last check:{" "}
-                {state.deckyLastCheck ? new Date(state.deckyLastCheck.timestamp).toLocaleTimeString() : "Never"}
-              </div>
-              {state.deckyLastCheck && (
-                <div style={{ color: statusColor(state.deckyLastCheck) }}>
-                  {state.deckyLastCheck.pendingCount === 0
-                    ? "All plugins up to date"
-                    : `${state.deckyLastCheck.forcedCount} of ${state.deckyLastCheck.pendingCount} updated`}
-                </div>
-              )}
-              {state.deckyLastCheck?.errors.length ? (
-                <div style={{ color: "#e63946", marginTop: 2 }}>{state.deckyLastCheck.errors[0]}</div>
-              ) : null}
-            </div>
-          </PanelSectionRow>
-
-          {state.deckyLastCheck && state.deckyLastCheck.deckyPluginUpdates.length > 0 && (
-            <PanelSectionRow>
-              <ButtonItem layout="below" onClick={() => setShowDeckyUpdates(!showDeckyUpdates)}>
-                {showDeckyUpdates ? "Hide details" : `Show ${state.deckyLastCheck.deckyPluginUpdates.length} updates`}
-              </ButtonItem>
-            </PanelSectionRow>
-          )}
-
-          {showDeckyUpdates && state.deckyLastCheck && state.deckyLastCheck.deckyPluginUpdates.length > 0 && (
-            <PanelSectionRow>
-              <div style={{ fontSize: "0.8em", opacity: 0.7, maxHeight: 200, overflowY: "auto" }}>
-                {state.deckyLastCheck.deckyPluginUpdates.map((u) => (
-                  <div key={u.name} style={{ marginBottom: 4 }}>
-                    <div>{u.name}</div>
-                    <div style={{ opacity: 0.6 }}>
-                      {u.currentVersion} {"\u2192"} {u.newVersion}
+            {state.flatpakLastCheck && state.flatpakLastCheck.flatpakUpdates.length > 0 && (
+              <>
+                <PanelSectionRow>
+                  <ButtonItem layout="below" onClick={() => setShowFlatpakUpdates(!showFlatpakUpdates)}>
+                    {showFlatpakUpdates ? "Hide details" : `Show ${state.flatpakLastCheck.flatpakUpdates.length} updates`}
+                  </ButtonItem>
+                </PanelSectionRow>
+                {showFlatpakUpdates && (
+                  <PanelSectionRow>
+                    <div style={DETAIL_LIST_STYLE}>
+                      {state.flatpakLastCheck.flatpakUpdates.map((u) => (
+                        <div key={u.id} style={{ marginBottom: 4 }}>
+                          <div>{u.name}</div>
+                          <div style={{ opacity: 0.6 }}>{u.downloadSize}</div>
+                        </div>
+                      ))}
                     </div>
-                  </div>
-                ))}
-              </div>
+                  </PanelSectionRow>
+                )}
+              </>
+            )}
+          </>
+        )}
+
+        {state.deckyAvailable && settings.deckyPluginUpdatesEnabled && (
+          <>
+            <PanelSectionRow>
+              <ButtonItem
+                label="Decky Plugins"
+                description={statusDesc("decky", state.deckyLastCheck)}
+                layout="inline"
+                disabled={deckyBusy}
+                onClick={() => handleCheck("decky")}
+              >
+                {deckyStatusLabel(state.deckyStatus)}
+              </ButtonItem>
             </PanelSectionRow>
-          )}
+            {state.deckyLastCheck && state.deckyLastCheck.deckyPluginUpdates.length > 0 && (
+              <>
+                <PanelSectionRow>
+                  <ButtonItem layout="below" onClick={() => setShowDeckyUpdates(!showDeckyUpdates)}>
+                    {showDeckyUpdates ? "Hide details" : `Show ${state.deckyLastCheck.deckyPluginUpdates.length} updates`}
+                  </ButtonItem>
+                </PanelSectionRow>
+                {showDeckyUpdates && (
+                  <PanelSectionRow>
+                    <div style={DETAIL_LIST_STYLE}>
+                      {state.deckyLastCheck.deckyPluginUpdates.map((u) => (
+                        <div key={u.name} style={{ marginBottom: 4 }}>
+                          <div>{u.name}</div>
+                          <div style={{ opacity: 0.6 }}>{u.currentVersion} {"\u2192"} {u.newVersion}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </PanelSectionRow>
+                )}
+              </>
+            )}
+          </>
+        )}
 
+        {state.deckyAvailable && settings.deckyLoaderUpdateEnabled && (
           <PanelSectionRow>
             <ButtonItem
-              layout="below"
-              disabled={deckyBusy}
-              onClick={async () => {
-                const result = await service.triggerCheck("decky", "manual");
-                if (shouldToastResult(settings.notificationLevel, result)) {
-                  toaster.toast({
-                    title: `${sourceLabel("decky")} Updates`,
-                    body: formatUpdateSummary(result),
-                  });
-                }
-              }}
-            >
-              {deckyStatusLabel(state.deckyStatus)}
-            </ButtonItem>
-          </PanelSectionRow>
-        </PanelSection>
-      )}
-
-      {/* ── Decky Loader Status ──────────────── */}
-      {state.deckyAvailable && settings.deckyLoaderUpdateEnabled && (
-        <PanelSection title="Decky Loader">
-          <PanelSectionRow>
-            <div style={{ fontSize: "0.85em", opacity: 0.8 }}>
-              <div>
-                Last check:{" "}
-                {state.deckyLoaderLastCheck
-                  ? new Date(state.deckyLoaderLastCheck.timestamp).toLocaleTimeString()
-                  : "Never"}
-              </div>
-              {state.deckyLoaderLastCheck && (
-                <div style={{ color: statusColor(state.deckyLoaderLastCheck) }}>
-                  {state.deckyLoaderLastCheck.forcedCount > 0
-                    ? "Decky Loader updated"
-                    : state.deckyLoaderLastCheck.pendingCount === 0
-                      ? "Up to date"
-                      : "Update available"}
-                </div>
-              )}
-              {state.deckyLoaderLastCheck?.errors.length ? (
-                <div style={{ color: "#e63946", marginTop: 2 }}>{state.deckyLoaderLastCheck.errors[0]}</div>
-              ) : null}
-            </div>
-          </PanelSectionRow>
-
-          <PanelSectionRow>
-            <ButtonItem
-              layout="below"
+              label="Decky Loader"
+              description={statusDesc("decky-loader", state.deckyLoaderLastCheck)}
+              layout="inline"
               disabled={deckyLoaderBusy}
-              onClick={async () => {
-                const result = await service.triggerCheck("decky-loader", "manual");
-                if (shouldToastResult(settings.notificationLevel, result)) {
-                  toaster.toast({
-                    title: `${sourceLabel("decky-loader")} Update`,
-                    body: formatUpdateSummary(result),
-                  });
-                }
-              }}
+              onClick={() => handleCheck("decky-loader")}
             >
               {deckyLoaderStatusLabel(state.deckyLoaderStatus)}
             </ButtonItem>
           </PanelSectionRow>
-        </PanelSection>
-      )}
+        )}
 
-      {/* ── SteamOS Status ────────────────────── */}
-      {state.steamosAvailable && settings.steamosUpdateEnabled && (
-        <PanelSection title="SteamOS Updates">
-          <PanelSectionRow>
-            <div style={{ fontSize: "0.85em", opacity: 0.8 }}>
-              <div>
-                Last check:{" "}
-                {state.steamosLastCheck ? new Date(state.steamosLastCheck.timestamp).toLocaleTimeString() : "Never"}
-              </div>
-              {state.steamosLastCheck && (
-                <div style={{ color: statusColor(state.steamosLastCheck) }}>
-                  {state.steamosLastCheck.errors.length > 0
-                    ? "Check failed"
-                    : state.steamosLastCheck.forcedCount > 0
-                      ? "Update staged \u2014 reboot when ready"
-                      : state.steamosLastCheck.pendingCount === 0
-                        ? "Up to date"
-                        : "Update available"}
-                </div>
-              )}
-              {state.steamosLastCheck?.errors.length ? (
-                <div style={{ color: "#e63946", marginTop: 2 }}>{state.steamosLastCheck.errors[0]}</div>
-              ) : null}
-            </div>
-          </PanelSectionRow>
-
+        {state.steamosAvailable && settings.steamosUpdateEnabled && (
           <PanelSectionRow>
             <ButtonItem
-              layout="below"
+              label="SteamOS"
+              description={statusDesc("steamos", state.steamosLastCheck)}
+              layout="inline"
               disabled={steamosBusy}
-              onClick={async () => {
-                const result = await service.triggerCheck("steamos", "manual");
-                if (shouldToastResult(settings.notificationLevel, result)) {
-                  toaster.toast({
-                    title: `${sourceLabel("steamos")} Update`,
-                    body: formatUpdateSummary(result),
-                  });
-                }
-              }}
+              onClick={() => handleCheck("steamos")}
             >
               {steamosStatusLabel(state.steamosStatus)}
             </ButtonItem>
           </PanelSectionRow>
-        </PanelSection>
-      )}
+        )}
+      </PanelSection>
 
       {/* ── Update Sources ─────────────────────── */}
       <PanelSection title="Update Sources">
         <PanelSectionRow>
           <ToggleField
-            label="Steam updates"
-            description="Periodically force-start pending game updates"
+            label="Steam game updates"
+            description="Unpauses and force-starts scheduled game downloads"
             checked={settings.steamEnabled}
             onChange={(val) => update({ steamEnabled: val })}
           />
@@ -405,7 +278,7 @@ function AutoUpdatePanel() {
         {settings.steamEnabled && (
           <PanelSectionRow>
             <SliderField
-              label="Steam interval (minutes)"
+              label="Check every (minutes)"
               value={settings.steamCheckIntervalMinutes}
               min={5}
               max={120}
@@ -420,8 +293,8 @@ function AutoUpdatePanel() {
           <>
             <PanelSectionRow>
               <ToggleField
-                label="Flatpak updates"
-                description="Periodically check and apply Flatpak updates"
+                label="Flatpak app updates"
+                description="Check for updates to Flatpak apps (e.g. Firefox, Discord)"
                 checked={settings.flatpakEnabled}
                 onChange={(val) => update({ flatpakEnabled: val })}
               />
@@ -431,7 +304,7 @@ function AutoUpdatePanel() {
               <>
                 <PanelSectionRow>
                   <SliderField
-                    label="Flatpak interval (hours)"
+                    label="Check every (hours)"
                     value={settings.flatpakCheckIntervalMinutes / 60}
                     min={1}
                     max={24}
@@ -443,8 +316,8 @@ function AutoUpdatePanel() {
 
                 <PanelSectionRow>
                   <ToggleField
-                    label="Auto-apply Flatpak updates"
-                    description="Automatically install updates when found"
+                    label="Auto-install Flatpak updates"
+                    description="Install immediately when found. When off, only checks and reports."
                     checked={settings.flatpakAutoApply}
                     onChange={(val) => update({ flatpakAutoApply: val })}
                   />
@@ -459,7 +332,7 @@ function AutoUpdatePanel() {
             <PanelSectionRow>
               <ToggleField
                 label="Decky plugin updates"
-                description="Auto-update third-party Decky plugins"
+                description="Auto-update installed Decky plugins from the store"
                 checked={settings.deckyPluginUpdatesEnabled}
                 onChange={(val) => update({ deckyPluginUpdatesEnabled: val })}
               />
@@ -469,7 +342,7 @@ function AutoUpdatePanel() {
               <>
                 <PanelSectionRow>
                   <SliderField
-                    label="Decky interval (hours)"
+                    label="Check every (hours)"
                     value={settings.deckyCheckIntervalMinutes / 60}
                     min={1}
                     max={48}
@@ -492,7 +365,7 @@ function AutoUpdatePanel() {
                       }
                     }}
                   >
-                    {showBlacklist ? "Hide excluded plugins" : "Excluded plugins"}
+                    {showBlacklist ? "Hide skip list" : "Skip list"}
                   </ButtonItem>
                 </PanelSectionRow>
 
@@ -504,15 +377,15 @@ function AutoUpdatePanel() {
                       </PanelSectionRow>
                     )}
                     {installedPlugins.map((plugin) => {
-                      const isBlacklisted = settings.deckyPluginBlacklist.some(
+                      const isSkipped = settings.deckyPluginBlacklist.some(
                         (b) => b.toLowerCase() === plugin.name.toLowerCase(),
                       );
                       return (
                         <PanelSectionRow key={plugin.name}>
                           <ToggleField
                             label={plugin.name}
-                            description={isBlacklisted ? "Excluded from auto-updates" : `v${plugin.version}`}
-                            checked={isBlacklisted}
+                            description={isSkipped ? "Skipped" : `v${plugin.version}`}
+                            checked={isSkipped}
                             onChange={(val) => {
                               const current = settings.deckyPluginBlacklist;
                               if (val) {
@@ -537,7 +410,7 @@ function AutoUpdatePanel() {
             <PanelSectionRow>
               <ToggleField
                 label="Decky Loader updates"
-                description="Auto-update Decky Loader itself"
+                description="Keep Decky Loader itself up to date"
                 checked={settings.deckyLoaderUpdateEnabled}
                 onChange={(val) => update({ deckyLoaderUpdateEnabled: val })}
               />
@@ -550,7 +423,7 @@ function AutoUpdatePanel() {
             <PanelSectionRow>
               <ToggleField
                 label="SteamOS updates"
-                description="Auto-download and stage SteamOS updates"
+                description="Download and stage system updates (won't reboot automatically)"
                 checked={settings.steamosUpdateEnabled}
                 onChange={(val) => update({ steamosUpdateEnabled: val })}
               />
@@ -559,7 +432,7 @@ function AutoUpdatePanel() {
             {settings.steamosUpdateEnabled && (
               <PanelSectionRow>
                 <SliderField
-                  label="SteamOS interval (hours)"
+                  label="Check every (hours)"
                   value={settings.steamosCheckIntervalMinutes / 60}
                   min={1}
                   max={48}
@@ -573,12 +446,11 @@ function AutoUpdatePanel() {
         )}
       </PanelSection>
 
-      {/* ── Check Schedule ─────────────────────── */}
-      <PanelSection title="Check Schedule">
+      {/* ── Automatic Checks ───────────────────── */}
+      <PanelSection title="Automatic Checks">
         <PanelSectionRow>
           <ToggleField
-            label="Check on wake"
-            description="Check for updates when the device wakes from sleep"
+            label="After waking from sleep"
             checked={settings.checkOnWake}
             onChange={(val) => update({ checkOnWake: val })}
           />
@@ -586,8 +458,7 @@ function AutoUpdatePanel() {
 
         <PanelSectionRow>
           <ToggleField
-            label="Check after game closes"
-            description="Check for updates when all games have exited"
+            label="After closing a game"
             checked={settings.checkOnGameClose}
             onChange={(val) => update({ checkOnGameClose: val })}
           />
@@ -595,29 +466,10 @@ function AutoUpdatePanel() {
 
         <PanelSectionRow>
           <ToggleField
-            label="Check during gameplay"
-            description="Allow scheduled checks while a game is running"
+            label="During gameplay"
+            description="Run scheduled checks even while a game is running"
             checked={settings.checkDuringGameplay}
             onChange={(val) => update({ checkDuringGameplay: val })}
-          />
-        </PanelSectionRow>
-      </PanelSection>
-
-      {/* ── Notifications ──────────────────────── */}
-      <PanelSection title="Notifications">
-        <PanelSectionRow>
-          <DropdownItem
-            label="Toast notifications"
-            description={
-              settings.notificationLevel === "off"
-                ? "No toast notifications"
-                : settings.notificationLevel === "updates-only"
-                  ? "Toast when updates are found or applied"
-                  : "Toast after every check"
-            }
-            rgOptions={NOTIFICATION_OPTIONS}
-            selectedOption={settings.notificationLevel}
-            onChange={(opt) => update({ notificationLevel: opt.data })}
           />
         </PanelSectionRow>
       </PanelSection>
@@ -625,9 +477,25 @@ function AutoUpdatePanel() {
       {/* ── Advanced ───────────────────────────── */}
       <PanelSection title="Advanced">
         <PanelSectionRow>
+          <DropdownItem
+            label="Notifications"
+            description={
+              settings.notificationLevel === "off"
+                ? "No toast notifications"
+                : settings.notificationLevel === "updates-only"
+                  ? "Toast when updates are found or applied"
+                  : "Toast after every check, even if nothing found"
+            }
+            rgOptions={NOTIFICATION_OPTIONS}
+            selectedOption={settings.notificationLevel}
+            onChange={(opt) => update({ notificationLevel: opt.data })}
+          />
+        </PanelSectionRow>
+
+        <PanelSectionRow>
           <ToggleField
-            label="Log history"
-            description="Keep a record of past update checks"
+            label="Update history"
+            description="Keep a log of past update activity"
             checked={settings.logHistory}
             onChange={(val) => update({ logHistory: val })}
           />
@@ -636,7 +504,7 @@ function AutoUpdatePanel() {
         <PanelSectionRow>
           <ToggleField
             label="Debug logging"
-            description="Write detailed diagnostic info to the browser console and plugin log"
+            description="Verbose diagnostics in browser console and plugin log"
             checked={settings.debugLogging}
             onChange={(val) => update({ debugLogging: val })}
           />
@@ -662,12 +530,12 @@ function AutoUpdatePanel() {
           {expanded && (
             <>
               <div style={{ maxHeight: 300, overflowY: "auto" }}>
-                {state.historyEntries.map((entry, i) => (
-                  <PanelSectionRow key={i}>
+                {state.historyEntries.map((entry) => (
+                  <PanelSectionRow key={`${entry.source}-${entry.timestamp}`}>
                     <div style={{ fontSize: "0.8em", padding: "4px 0" }}>
                       <div
                         style={{
-                          color: entry.forcedCount > 0 ? "#2a9d8f" : "#fca311",
+                          color: entry.forcedCount > 0 ? COLOR_SUCCESS : COLOR_WARNING,
                           fontWeight: 500,
                         }}
                       >
