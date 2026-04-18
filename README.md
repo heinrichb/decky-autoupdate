@@ -6,31 +6,31 @@
 
 A [Decky Loader](https://decky.xyz) plugin that automatically keeps your Steam games and Flatpak apps up to date on Steam Deck.
 
-## The Problem
+## Why
 
-Steam schedules game updates instead of downloading them immediately. On Steam Deck and always-on machines, this creates large queues of pending updates that may never fully process — especially if the system goes offline before the scheduled window. Flatpak apps have a similar problem: updates are available but require manual action through Discover or the command line.
+Steam schedules game updates instead of downloading them immediately, so on an always-on Steam Deck you can end up with a queue of pending downloads that never finishes. Flatpak apps have the same issue: updates sit there until you open Discover or run `flatpak update` by hand.
 
 ## Features
 
-- **Steam game updates** — Periodically scans for pending/scheduled game updates and force-starts them all
-- **Flatpak app updates** — Periodically checks for and applies Flatpak updates in the background
-- **Independent controls** — Enable or disable each update source separately
-- **Manual trigger** — Per-source "Check" buttons and a "Check All" button in the Decky sidebar
-- **Configurable intervals** — Steam: 5–120 minutes (default 30). Flatpak: 1–24 hours (default 12)
-- **Background operation** — Runs continuously without needing the plugin panel open
-- **Update details** — Expandable lists showing game names, app names, and download sizes
-- **Color-coded status** — Green (up to date), yellow (pending), red (errors)
-- **History log** — Track past update checks with timestamps, source, and counts
-- **Toast notifications** — Optional notifications when updates are found
+- Steam game updates: periodic scan for pending/scheduled updates and force-start
+- Flatpak app updates: periodic check and background apply
+- Independent toggles for each update source
+- Manual per-source "Check" buttons plus "Check All"
+- Configurable intervals (Steam 5-120 min, Flatpak 1-24 h)
+- Runs in the background with the panel closed
+- Expandable update details (game names, app names, sizes)
+- Color-coded status (green up to date, yellow pending, red error)
+- History log of past checks
+- Optional toast notifications when updates are found
 
 ## Configuration
 
 | Setting | Default | Range | Description |
 |---------|---------|-------|-------------|
 | Steam updates | on | on/off | Enable periodic Steam game update checks |
-| Steam interval | 30 min | 5–120 min | How often to scan for pending game updates |
+| Steam interval | 30 min | 5-120 min | How often to scan for pending game updates |
 | Flatpak updates | on | on/off | Enable periodic Flatpak update checks |
-| Flatpak interval | 12 hours | 1–24 hours | How often to check for Flatpak updates |
+| Flatpak interval | 12 hours | 1-24 hours | How often to check for Flatpak updates |
 | Auto-apply Flatpak | on | on/off | Automatically install Flatpak updates when found |
 | Notifications | on | on/off | Show a toast notification after each check |
 | Log history | on | on/off | Record past update checks for review |
@@ -63,9 +63,9 @@ All settings persist across plugin reloads and system reboots.
 +-----------------------------------------------------+
 ```
 
-**Why frontend-driven for Steam?** `SteamClient` is a JavaScript global in Steam's CEF context — Python has no access to it. The frontend stays alive for the entire Decky session, so `setInterval` works as a background timer.
+Steam logic lives on the frontend because `SteamClient` is a JS global in Steam's CEF context (no Python access). The frontend is alive for the whole Decky session, so `setInterval` is enough for a background timer.
 
-**Why backend-driven for Flatpak?** Flatpak operations require running system commands. The Python backend runs with root privileges (via the `root` flag in `plugin.json`) and uses `sudo -u deck` to execute flatpak commands as the deck user.
+Flatpak logic lives in the Python backend because it needs to run system commands. The backend runs with root (via the `root` flag in `plugin.json`) and drops to the `deck` user via `runuser` to run user-scope flatpak commands.
 
 ## Development
 
@@ -83,20 +83,20 @@ pnpm build
 ## FAQ
 
 **Does this drain battery on Steam Deck?**
-The Steam check is lightweight — it queries Steam's in-memory state and doesn't touch the network. Flatpak checks run infrequently (default every 12 hours). Battery impact is negligible.
+The Steam check reads Steam's in-memory state and doesn't touch the network. Flatpak checks run at a configurable interval (default 12 hours). Battery impact is negligible.
 
-**Does it work on desktop Linux/Windows?**
-It runs wherever Decky Loader runs. The primary targets are Steam Deck and always-on SteamOS machines. Flatpak features are only shown if flatpak is installed.
+**Does it work on desktop Linux?**
+It runs wherever Decky Loader runs. The primary targets are Steam Deck and always-on SteamOS machines. The Flatpak section is only shown if flatpak is installed.
 
 **What if there are no pending updates?**
-The check completes instantly with zero forced updates. No unnecessary work is done.
+The check returns immediately with zero forced updates.
 
 **Can I run this on a machine with thousands of games?**
-Yes. The plugin is designed for large libraries. The SteamClient API enumeration is handled by Steam's own internal data structures.
+Yes. Enumeration is handled by Steam's own internal data structures.
 
 **Can I use this alongside decky-autoflatpaks?**
-You can, but there's no need — AutoUpdate handles Flatpak auto-updates natively. If you only want the full Flatpak package manager (browse, install, uninstall, mask, repair), keep decky-autoflatpaks for that.
+Yes. AutoUpdate covers Flatpak auto-updates; decky-autoflatpaks adds the full package manager UI (browse, install, uninstall, mask, repair) if you need it.
 
 ## License
 
-[BSD-3-Clause](LICENSE) — Copyright (c) 2026, Brennen Heinrich
+[BSD-3-Clause](LICENSE). Copyright (c) 2026, Brennen Heinrich.

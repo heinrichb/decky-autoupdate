@@ -1,5 +1,5 @@
 /**
- * AutoUpdateService — singleton that runs background timers at the plugin level,
+ * AutoUpdateService - singleton that runs background timers at the plugin level,
  * NOT inside React hooks. This ensures wake detection and periodic checks work
  * even when the QAM panel is closed.
  *
@@ -24,8 +24,7 @@ import {
 import { waitForSteamClient, registerForResume, registerForAppLifetime } from "./steamClient";
 import {
   checkSteam,
-  checkFlatpakOnly,
-  applyFlatpak,
+  checkAndApplyFlatpak,
   isFlatpakAvailable,
   isDeckyApiAvailable,
   applyDeckyPluginUpdates,
@@ -150,7 +149,7 @@ class AutoUpdateService {
     }
     this.notify();
 
-    // Availability checks are independent — run in parallel
+    // Availability checks are independent - run in parallel
     debug("Running availability checks...");
     const [, steamAvailable] = await Promise.all([
       isFlatpakAvailable()
@@ -196,7 +195,7 @@ class AutoUpdateService {
     this.rebuildPeriodicTimers();
 
     log(
-      "Service started —",
+      "Service started.",
       "checkOnWake:",
       this.state.settings.checkOnWake,
       "| flatpak:",
@@ -264,21 +263,23 @@ class AutoUpdateService {
 
   async triggerAll(trigger: Trigger = "manual"): Promise<UpdateCheckResult[]> {
     const s = this.state.settings;
-    const checks: { source: UpdateSource; promise: Promise<UpdateCheckResult> }[] = [];
+    const sources: UpdateSource[] = [];
 
-    if (s.steamEnabled && this.state.steamReady)
-      checks.push({ source: "steam", promise: this.runCheck("steam", trigger) });
-    if (s.flatpakEnabled && this.state.flatpakAvailable)
-      checks.push({ source: "flatpak", promise: this.runCheck("flatpak", trigger) });
-    if (s.deckyPluginUpdatesEnabled && this.state.deckyAvailable)
-      checks.push({ source: "decky", promise: this.runCheck("decky", trigger) });
-    if (s.deckyLoaderUpdateEnabled && this.state.deckyAvailable)
-      checks.push({ source: "decky-loader", promise: this.runCheck("decky-loader", trigger) });
-    if (s.steamosUpdateEnabled && this.state.steamosAvailable)
-      checks.push({ source: "steamos", promise: this.runCheck("steamos", trigger) });
+    if (s.steamEnabled && this.state.steamReady) sources.push("steam");
+    if (s.flatpakEnabled && this.state.flatpakAvailable) sources.push("flatpak");
+    if (s.deckyPluginUpdatesEnabled && this.state.deckyAvailable) sources.push("decky");
+    if (s.deckyLoaderUpdateEnabled && this.state.deckyAvailable) sources.push("decky-loader");
+    if (s.steamosUpdateEnabled && this.state.steamosAvailable) sources.push("steamos");
 
-    debug(`triggerAll(${trigger}): [${checks.map((c) => c.source).join(", ")}]`);
-    return Promise.all(checks.map((c) => c.promise));
+    debug(`triggerAll(${trigger}): [${sources.join(", ")}]`);
+
+    // Run sequentially - Decky Loader closes WebSocket connections when
+    // concurrent plugin method calls arrive on separate sockets.
+    const results: UpdateCheckResult[] = [];
+    for (const source of sources) {
+      results.push(await this.runCheck(source, trigger));
+    }
+    return results;
   }
 
   async clearHistory() {
@@ -346,6 +347,10 @@ class AutoUpdateService {
       debug("Wake: checkOnWake is OFF, skipping");
       return;
     }
+
+    // Let Steam's download manager re-initialize after waking from sleep
+    debug("Wake: waiting 8s for Steam to settle...");
+    await new Promise((r) => setTimeout(r, 8000));
 
     await this.runAllEnabledChecks("wake");
 
@@ -507,7 +512,7 @@ class AutoUpdateService {
       const result = await this.getProvider(source)();
       const elapsed = Date.now() - t0;
       log(
-        `${source}: check complete in ${elapsed}ms — ${result.pendingCount} pending, ${result.forcedCount} applied, ${result.errors.length} errors`,
+        `${source}: check complete in ${elapsed}ms - ${result.pendingCount} pending, ${result.forcedCount} applied, ${result.errors.length} errors`,
       );
       if (result.errors.length > 0) {
         debug(`${source}: errors:`, result.errors);
@@ -544,26 +549,13 @@ class AutoUpdateService {
   }
 
   private async flatpakProvider(): Promise<UpdateCheckResult> {
-    debug("flatpakProvider: checking for updates...");
-    const checkResult = await checkFlatpakOnly();
-    if (checkResult.errors.length > 0 || checkResult.pendingCount === 0) {
-      debug(
-        "flatpakProvider: returning early —",
-        checkResult.pendingCount,
-        "pending,",
-        checkResult.errors.length,
-        "errors",
-      );
-      return checkResult;
-    }
-    if (this.state.settings.flatpakAutoApply) {
-      log("flatpakProvider: auto-applying", checkResult.pendingCount, "update(s)");
+    const autoApply = this.state.settings.flatpakAutoApply;
+    debug("flatpakProvider: autoApply =", autoApply);
+    if (autoApply) {
       this.state.flatpakStatus = "applying";
       this.notify();
-      return applyFlatpak(checkResult.flatpakUpdates);
     }
-    debug("flatpakProvider: auto-apply disabled, returning check result");
-    return checkResult;
+    return checkAndApplyFlatpak(autoApply);
   }
 
   private deckyProvider(): Promise<UpdateCheckResult> {

@@ -1,5 +1,5 @@
 /**
- * Tests for deckyApi.ts — version comparison, artifact URL building,
+ * Tests for deckyApi.ts - version comparison, artifact URL building,
  * plugin filtering, and IPC call serialization.
  */
 

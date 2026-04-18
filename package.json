@@ -1,7 +1,7 @@
 {
   "name": "decky-autoupdate",
   "version": "0.1.0",
-  "description": "All-in-one auto-updater for Steam Deck — Steam games, Flatpak apps, Decky plugins, Decky Loader, and SteamOS.",
+  "description": "Auto-updater for Steam Deck covering Steam games, Flatpak apps, Decky plugins, Decky Loader, and SteamOS.",
   "license": "BSD-3-Clause",
   "type": "module",
   "scripts": {

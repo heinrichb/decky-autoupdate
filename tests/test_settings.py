@@ -40,7 +40,7 @@ def make_plugin():
 
 
 class TestValidateSettings(unittest.TestCase):
-    """Tests for _validate_settings — the most critical backend function."""
+    """Tests for _validate_settings - the most critical backend function."""
 
     def test_defaults_are_complete(self):
         """Every field in defaults should be present and have the right type."""

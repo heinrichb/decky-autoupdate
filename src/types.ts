@@ -1,7 +1,7 @@
 /**
- * "off"          — no toasts at all
- * "updates-only" — toast only when updates are found or applied
- * "all"          — toast after every check, even when nothing is found
+ * "off"          - no toasts at all
+ * "updates-only" - toast only when updates are found or applied
+ * "all"          - toast after every check, even when nothing is found
  */
 export type NotificationLevel = "off" | "updates-only" | "all";
 
@@ -42,6 +42,7 @@ export interface FlatpakUpdate {
   id: string;
   name: string;
   downloadSize: string;
+  scope?: "user" | "system";
 }
 
 export interface DeckyPluginUpdate {

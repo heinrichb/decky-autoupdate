@@ -18,10 +18,14 @@ class Plugin:
     _defaults_cache: dict | None = None
     _last_appstream_refresh: float = 0
     _history_lock: asyncio.Lock | None = None
-    _flatpak_scope: str | None = None  # "user", "system", or None (not yet detected)
+    _flatpak_lock: asyncio.Lock | None = None
+    _steamos_lock: asyncio.Lock | None = None
+    _flatpak_scopes: list[str] | None = None  # ["user"], ["system"], or ["user", "system"]
 
     async def _main(self):
         self._history_lock = asyncio.Lock()
+        self._flatpak_lock = asyncio.Lock()
+        self._steamos_lock = asyncio.Lock()
         self.settings_path = os.path.join(
             decky.DECKY_PLUGIN_SETTINGS_DIR, SETTINGS_FILENAME
         )
@@ -39,7 +43,7 @@ class Plugin:
     async def _uninstall(self):
         decky.logger.info("AutoUpdate uninstalled")
 
-    # ── Settings ────────────────────────────────────────────
+    # --- Settings ---
 
     async def get_settings(self) -> dict:
         return self.settings
@@ -57,7 +61,7 @@ class Plugin:
         defaults = self._default_settings()
         validated = {}
 
-        # ── Migrations ──
+        # Migrations:
         # checkIntervalMinutes → steamCheckIntervalMinutes
         if "checkIntervalMinutes" in settings and "steamCheckIntervalMinutes" not in settings:
             settings["steamCheckIntervalMinutes"] = settings["checkIntervalMinutes"]
@@ -103,7 +107,7 @@ class Plugin:
         validated["steamosCheckIntervalMinutes"] = max(60, min(2880, validated["steamosCheckIntervalMinutes"]))
         return validated
 
-    # ── History ─────────────────────────────────────────────
+    # --- History ---
 
     async def get_history(self) -> list:
         data = self._load_json(self.history_path, {"entries": []})
@@ -122,11 +126,11 @@ class Plugin:
         return self._write_json(self.history_path, {"entries": []})
 
     async def ping(self) -> bool:
-        """Fast IPC health check — returns immediately."""
+        """Fast IPC health check. Returns immediately."""
         self._debug("ping received")
         return True
 
-    # ── Subprocess helpers ──────────────────────────────────
+    # --- Subprocess helpers ---
 
     # Cached deck user info (never changes at runtime)
     _deck_uid: int | None = None
@@ -149,7 +153,7 @@ class Plugin:
     def _minimal_env() -> dict[str, str]:
         """Build a minimal environment free of Steam runtime pollution.
 
-        Never copy os.environ — Steam runtime pollution causes hangs.
+        Never copy os.environ: Steam runtime pollution causes hangs.
         """
         uid, _ = Plugin._deck_user_info()
         return {
@@ -160,10 +164,14 @@ class Plugin:
 
     @staticmethod
     def _deck_env() -> dict[str, str]:
-        """Minimal env plus HOME for user-level flatpak access."""
+        """Minimal env plus HOME and XDG_DATA_DIRS for user-level flatpak."""
         env = Plugin._minimal_env()
         _, home = Plugin._deck_user_info()
         env["HOME"] = home
+        env["XDG_DATA_DIRS"] = (
+            f"{home}/.local/share/flatpak/exports/share"
+            ":/usr/local/share:/usr/share"
+        )
         return env
 
     def _debug(self, msg: str):
@@ -200,22 +208,21 @@ class Plugin:
         self._debug(f"stdout ({len(out_text)} chars): {out_text.strip()[:200]}")
         return rc, out_text, err_text
 
-    # ── Flatpak ─────────────────────────────────────────────
+    # --- Flatpak ---
 
     async def get_flatpak_available(self) -> bool:
         return os.path.isfile("/usr/bin/flatpak")
 
-    async def _detect_flatpak_scope(self) -> str:
-        """Detect whether flatpaks are installed at user or system level.
+    async def _detect_flatpak_scopes(self) -> list[str]:
+        """Detect which flatpak scopes have installed apps.
 
-        Returns "user" or "system". Checks user-level first (as deck user)
-        since that's the common case on SteamOS when apps are installed via
-        desktop mode or Discover.
+        Returns a list of active scopes, e.g. ["user", "system"] or ["user"].
+        Both scopes are checked so updates are never missed.
         """
-        if self._flatpak_scope is not None:
-            self._debug(f"Flatpak scope cached: {self._flatpak_scope}")
-            return self._flatpak_scope
-        self._debug("Detecting flatpak scope...")
+        if self._flatpak_scopes is not None:
+            self._debug(f"Flatpak scopes cached: {self._flatpak_scopes}")
+            return self._flatpak_scopes
+        self._debug("Detecting flatpak scopes...")
 
         async def _count_user() -> int:
             try:
@@ -242,25 +249,23 @@ class Plugin:
 
         user_count, system_count = await asyncio.gather(_count_user(), _count_system())
 
-        if user_count >= system_count:
-            self._flatpak_scope = "user"
-        else:
-            self._flatpak_scope = "system"
+        scopes = []
+        if user_count > 0:
+            scopes.append("user")
+        if system_count > 0:
+            scopes.append("system")
+        if not scopes:
+            scopes.append("user")
 
+        self._flatpak_scopes = scopes
         decky.logger.info(
-            f"Flatpak scope detected: {self._flatpak_scope} "
+            f"Flatpak scopes detected: {self._flatpak_scopes} "
             f"(user={user_count}, system={system_count})"
         )
-        return self._flatpak_scope
+        return self._flatpak_scopes
 
-    async def _run_flatpak(self, flatpak_args: list[str], timeout: int = 120) -> tuple[int, str, str]:
-        """Run a flatpak command targeting the detected installation scope.
-
-        For user-level: runs via runuser as the deck user with --user flag.
-        For system-level: runs directly as root.
-        """
-        scope = await self._detect_flatpak_scope()
-
+    def _flatpak_cmd(self, scope: str, flatpak_args: list[str]) -> tuple[list[str], dict[str, str]]:
+        """Build argv and env for a flatpak command at the given scope."""
         if scope == "user":
             argv = [
                 "/usr/bin/runuser", "-u", "deck", "--",
@@ -270,64 +275,82 @@ class Plugin:
         else:
             argv = ["/usr/bin/flatpak", "--system"] + flatpak_args
             env = Plugin._minimal_env()
+        return argv, env
 
+    async def _run_flatpak(self, scope: str, flatpak_args: list[str], timeout: int = 120) -> tuple[int, str, str]:
+        """Run a flatpak command for an explicit scope."""
+        argv, env = self._flatpak_cmd(scope, flatpak_args)
         return await self._run_cmd(argv, timeout, env=env)
 
     async def check_flatpak_updates(self) -> dict:
-        """List available flatpak updates without applying them."""
+        """List available flatpak updates across all active scopes."""
         self._debug("check_flatpak_updates called")
         try:
+            scopes = await self._detect_flatpak_scopes()
 
             # Refresh appstream metadata if stale (throttled to once per 6 hours)
             now = time.monotonic()
             if now - self._last_appstream_refresh > APPSTREAM_REFRESH_INTERVAL:
-                try:
-                    await self._run_flatpak(["update", "--appstream", "--noninteractive"], timeout=30)
-                    self._last_appstream_refresh = now
-                except Exception as e:
-                    decky.logger.warning(f"Appstream refresh failed (non-critical): {e}")
-
-            rc, stdout, stderr = await self._run_flatpak(
-                ["remote-ls", "--updates", "--columns=application:f,name:f,download-size:f"]
-            )
-
-            if rc != 0:
-                decky.logger.error(f"flatpak remote-ls failed (rc={rc}): {stderr}")
-                return {"success": False, "updates": [], "error": stderr or f"flatpak exited with code {rc}"}
+                for scope in scopes:
+                    try:
+                        await self._run_flatpak(scope, ["update", "--appstream", "--noninteractive"], timeout=30)
+                    except Exception as e:
+                        decky.logger.warning(f"Appstream refresh failed for {scope} (non-critical): {e}")
+                self._last_appstream_refresh = now
 
             updates = []
-            for line in stdout.strip().splitlines():
-                parts = line.split("\t")
-                if len(parts) >= 2:
-                    updates.append({
-                        "id": parts[0].strip(),
-                        "name": parts[1].strip(),
-                        "downloadSize": parts[2].strip() if len(parts) >= 3 else "",
-                    })
+            errors = []
+            for scope in scopes:
+                rc, stdout, stderr = await self._run_flatpak(
+                    scope, ["remote-ls", "--updates", "--columns=application:f,name:f,download-size:f"]
+                )
+                if rc != 0:
+                    decky.logger.error(f"flatpak remote-ls --{scope} failed (rc={rc}): {stderr}")
+                    errors.append(stderr or f"flatpak --{scope} exited with code {rc}")
+                    continue
+                for line in stdout.strip().splitlines():
+                    parts = line.split("\t")
+                    if len(parts) >= 2:
+                        updates.append({
+                            "id": parts[0].strip(),
+                            "name": parts[1].strip(),
+                            "downloadSize": parts[2].strip() if len(parts) >= 3 else "",
+                            "scope": scope,
+                        })
 
             decky.logger.info(f"Flatpak check complete: {len(updates)} update(s) found")
             if updates:
                 names = ", ".join(u["name"] for u in updates[:10])
                 decky.logger.info(f"  Updates: {names}")
 
-            return {"success": True, "updates": updates, "error": ""}
+            return {"success": len(errors) == 0, "updates": updates, "error": "; ".join(errors)}
         except Exception as e:
             decky.logger.error(f"Failed to check flatpak updates: {e}")
             return {"success": False, "updates": [], "error": str(e)}
 
     async def apply_flatpak_updates(self) -> dict:
-        """Apply all available flatpak updates."""
+        """Apply all available flatpak updates across all active scopes."""
+        self._debug("apply_flatpak_updates called")
         try:
-            rc, stdout, stderr = await self._run_flatpak(["update", "--noninteractive"], timeout=600)
-            if rc == 0:
-                decky.logger.info("Flatpak updates applied successfully")
-            else:
-                decky.logger.error(f"Flatpak update failed (rc={rc}): {stderr[:500]}")
+            scopes = await self._detect_flatpak_scopes()
+            all_stdout, all_stderr = [], []
+            failed = False
+
+            for scope in scopes:
+                rc, stdout, stderr = await self._run_flatpak(scope, ["update", "--noninteractive"], timeout=600)
+                if rc == 0:
+                    decky.logger.info(f"Flatpak --{scope} updates applied successfully")
+                else:
+                    decky.logger.error(f"Flatpak --{scope} update failed (rc={rc}): {stderr[:500]}")
+                    failed = True
+                all_stdout.append(stdout)
+                all_stderr.append(stderr)
+
             return {
-                "success": rc == 0,
-                "stdout": stdout,
-                "stderr": stderr,
-                "returncode": rc,
+                "success": not failed,
+                "stdout": "\n".join(all_stdout),
+                "stderr": "\n".join(all_stderr),
+                "returncode": 1 if failed else 0,
             }
         except Exception as e:
             decky.logger.error(f"Failed to apply flatpak updates: {e}")
@@ -338,7 +361,34 @@ class Plugin:
                 "returncode": -1,
             }
 
-    # ── SteamOS ─────────────────────────────────────────────
+    async def check_and_apply_flatpak(self, auto_apply: bool) -> dict:
+        """Check for flatpak updates and optionally apply them in one IPC call.
+
+        Uses a lock to prevent duplicate concurrent operations when the
+        frontend reloads and both old/new instances call simultaneously.
+        """
+        self._debug(f"check_and_apply_flatpak called (auto_apply={auto_apply})")
+        if self._flatpak_lock is None:
+            self._flatpak_lock = asyncio.Lock()
+        if self._flatpak_lock.locked():
+            decky.logger.info("Flatpak operation already in progress, skipping duplicate call")
+            return {"success": True, "updates": [], "error": "", "applied": False, "applyError": ""}
+
+        async with self._flatpak_lock:
+            check = await self.check_flatpak_updates()
+            if not auto_apply or not check["updates"]:
+                self._debug(f"check_and_apply_flatpak returning without apply (auto_apply={auto_apply}, updates={len(check['updates'])})")
+                return {**check, "applied": False, "applyError": ""}
+
+            decky.logger.info(f"Auto-applying {len(check['updates'])} flatpak update(s)")
+            apply = await self.apply_flatpak_updates()
+            return {
+                **check,
+                "applied": apply["success"],
+                "applyError": apply["stderr"] if not apply["success"] else "",
+            }
+
+    # --- SteamOS ---
 
     async def get_steamos_update_available(self) -> bool:
         return os.path.isfile("/usr/bin/steamos-update")
@@ -359,15 +409,17 @@ class Plugin:
             # Exit 7 = no update available
             # Exit 8 = update already applied, reboot needed
             stderr_text = stderr.strip()
-            if stderr_text:
-                decky.logger.warning(f"steamos-update stderr: {stderr_text}")
             if rc == 0:
+                decky.logger.info(f"SteamOS update available: {stdout.strip()}")
                 return self._steamos_result(success=True, hasUpdate=True, buildId=stdout.strip())
             elif rc == 7:
+                self._debug("No SteamOS update available")
                 return self._steamos_result(success=True)
             elif rc == 8:
+                decky.logger.info("SteamOS update already staged, reboot needed")
                 return self._steamos_result(success=True, needsReboot=True)
             else:
+                decky.logger.error(f"steamos-update check failed (rc={rc}): {stderr_text}")
                 return self._steamos_result(error=stderr_text or f"steamos-update check exited with code {rc}")
         except FileNotFoundError:
             return self._steamos_result(error="steamos-update not found")
@@ -376,22 +428,39 @@ class Plugin:
             return self._steamos_result(error=str(e))
 
     async def apply_steamos_update(self) -> dict:
-        """Download and stage SteamOS update to inactive partition (no reboot)."""
-        try:
-            rc, stdout, stderr = await self._run_cmd(
-                ["/usr/bin/steamos-update"], timeout=600
-            )
-            return {
-                "success": rc == 0,
-                "stdout": stdout,
-                "stderr": stderr,
-                "returncode": rc,
-            }
-        except Exception as e:
-            decky.logger.error(f"Failed to apply SteamOS update: {e}")
-            return {"success": False, "stdout": "", "stderr": str(e), "returncode": -1}
+        """Download and stage SteamOS update to inactive partition (no reboot).
 
-    # ── Internals ───────────────────────────────────────────
+        Uses a lock to prevent duplicate concurrent steamos-update processes.
+        The GDBus interface rejects concurrent updates with 'one is already in
+        progress', so we skip the call entirely if another is running.
+        """
+        self._debug("apply_steamos_update called")
+        if self._steamos_lock is None:
+            self._steamos_lock = asyncio.Lock()
+        if self._steamos_lock.locked():
+            decky.logger.info("SteamOS update already in progress, skipping duplicate call")
+            return {"success": True, "stdout": "Skipped: already in progress", "stderr": "", "returncode": 0}
+
+        async with self._steamos_lock:
+            try:
+                rc, stdout, stderr = await self._run_cmd(
+                    ["/usr/bin/steamos-update"], timeout=600
+                )
+                if rc == 0:
+                    decky.logger.info("SteamOS update applied (reboot required to activate)")
+                else:
+                    decky.logger.error(f"steamos-update failed (rc={rc}): {stderr.strip()[:500]}")
+                return {
+                    "success": rc == 0,
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "returncode": rc,
+                }
+            except Exception as e:
+                decky.logger.error(f"Failed to apply SteamOS update: {e}")
+                return {"success": False, "stdout": "", "stderr": str(e), "returncode": -1}
+
+    # --- Internals ---
 
     def _default_settings(self) -> dict:
         if self._defaults_cache is not None:

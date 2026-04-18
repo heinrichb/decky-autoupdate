@@ -1,5 +1,5 @@
 /**
- * Update source providers — Steam, Flatpak, Decky plugins, Decky Loader, and SteamOS.
+ * Update source providers - Steam, Flatpak, Decky plugins, Decky Loader, and SteamOS.
  *
  * Each provider implements check() which returns an UpdateCheckResult.
  * steamClient.ts remains the raw SteamClient API layer;
@@ -22,6 +22,7 @@ import {
 // ── Backend call types ──────────────────────────────────────
 
 type FlatpakCheckResult = { success: boolean; updates: FlatpakUpdate[]; error: string };
+type FlatpakCheckAndApplyResult = FlatpakCheckResult & { applied: boolean; applyError: string };
 type SubprocessResult = { success: boolean; stdout: string; stderr: string; returncode: number };
 type SteamosCheckResult = {
   success: boolean;
@@ -55,71 +56,48 @@ export async function isFlatpakAvailable(): Promise<boolean> {
     return result;
   } catch (e) {
     debug("isFlatpakAvailable: failed:", errorMessage(e));
-    // Don't cache IPC errors — allow retry on next call
+    // Don't cache IPC errors - allow retry on next call
     return false;
   }
 }
 
 /**
- * Check for available Flatpak updates (does not apply them).
+ * Check for flatpak updates and optionally apply them in a single IPC call.
+ * Combining check+apply avoids a second WebSocket round-trip that Decky
+ * Loader may close if other plugin calls are queued concurrently.
  */
-export async function checkFlatpakOnly(): Promise<UpdateCheckResult> {
+export async function checkAndApplyFlatpak(autoApply: boolean): Promise<UpdateCheckResult> {
   try {
-    debug("checkFlatpakOnly: calling check_flatpak_updates...");
+    debug("checkAndApplyFlatpak: autoApply =", autoApply);
     const t0 = Date.now();
-    const check = await callPluginMethod<FlatpakCheckResult>("check_flatpak_updates", 60_000);
+    const r = await callPluginMethod<FlatpakCheckAndApplyResult>("check_and_apply_flatpak", [autoApply], 660_000);
     debug(
-      `checkFlatpakOnly: response in ${Date.now() - t0}ms — success=${check.success}, updates=${check.updates?.length ?? 0}`,
+      `checkAndApplyFlatpak: response in ${Date.now() - t0}ms - success=${r.success}, ` +
+        `updates=${r.updates?.length ?? 0}, applied=${r.applied}`,
     );
-    if (!check.success) {
-      return emptyResult("flatpak", [check.error || "Failed to check for Flatpak updates"]);
+
+    const errors: string[] = [];
+    if (r.applyError) {
+      errors.push(r.applyError);
+    } else if (!r.success) {
+      errors.push(r.error || "Failed to check for Flatpak updates");
     }
 
-    if (check.updates.length > 0) {
-      debug("checkFlatpakOnly: updates:", check.updates.map((u) => u.name).join(", "));
+    if (r.updates.length > 0) {
+      debug("checkAndApplyFlatpak: updates:", r.updates.map((u: FlatpakUpdate) => u.name).join(", "));
     }
 
     return {
       ...emptyResult("flatpak"),
-      pendingCount: check.updates.length,
-      flatpakUpdates: check.updates,
+      pendingCount: r.updates.length,
+      forcedCount: r.applied ? r.updates.length : 0,
+      errors,
+      flatpakUpdates: r.updates,
     };
   } catch (e) {
-    logError("checkFlatpakOnly failed:", errorMessage(e));
+    logError("checkAndApplyFlatpak failed:", errorMessage(e));
     return emptyResult("flatpak", [errorMessage(e)]);
   }
-}
-
-/**
- * Apply all available Flatpak updates. Call after checkFlatpakOnly.
- */
-export async function applyFlatpak(pendingUpdates: FlatpakUpdate[]): Promise<UpdateCheckResult> {
-  const errors: string[] = [];
-  let forcedCount = 0;
-
-  try {
-    debug("applyFlatpak: applying", pendingUpdates.length, "update(s)...");
-    const t0 = Date.now();
-    const apply = await callPluginMethod<SubprocessResult>("apply_flatpak_updates", 120_000);
-    debug(`applyFlatpak: completed in ${Date.now() - t0}ms — success=${apply.success}`);
-    if (apply.success) {
-      forcedCount = pendingUpdates.length;
-    } else {
-      logError("applyFlatpak: failed:", apply.stderr);
-      errors.push(apply.stderr || "Flatpak update failed");
-    }
-  } catch (e) {
-    logError("applyFlatpak: exception:", errorMessage(e));
-    errors.push(errorMessage(e));
-  }
-
-  return {
-    ...emptyResult("flatpak"),
-    pendingCount: pendingUpdates.length,
-    forcedCount,
-    errors,
-    flatpakUpdates: pendingUpdates,
-  };
 }
 
 // ── Decky plugin provider ───────────────────────────────────
@@ -254,7 +232,7 @@ export async function checkAndApplySteamos(): Promise<UpdateCheckResult> {
     const t0 = Date.now();
     const check = await callPluginMethod<SteamosCheckResult>("check_steamos_updates", 30_000);
     debug(
-      `checkAndApplySteamos: response in ${Date.now() - t0}ms — success=${check.success}, hasUpdate=${check.hasUpdate}`,
+      `checkAndApplySteamos: response in ${Date.now() - t0}ms - success=${check.success}, hasUpdate=${check.hasUpdate}`,
     );
 
     if (!check.success) {
@@ -262,7 +240,7 @@ export async function checkAndApplySteamos(): Promise<UpdateCheckResult> {
     }
 
     if (check.needsReboot) {
-      log("SteamOS update already staged — reboot to apply");
+      log("SteamOS update already staged - reboot to apply");
       return { ...emptyResult("steamos"), pendingCount: 1, forcedCount: 1 };
     }
 
@@ -270,11 +248,11 @@ export async function checkAndApplySteamos(): Promise<UpdateCheckResult> {
       return emptyResult("steamos");
     }
 
-    log(`SteamOS update available: build ${check.buildId} — downloading and staging`);
+    log(`SteamOS update available: build ${check.buildId} - downloading and staging`);
 
     debug("checkAndApplySteamos: applying update...");
     const apply = await callPluginMethod<SubprocessResult>("apply_steamos_update", 120_000);
-    debug("checkAndApplySteamos: apply result — success =", apply.success);
+    debug("checkAndApplySteamos: apply result - success =", apply.success);
     if (!apply.success) {
       return { ...emptyResult("steamos"), pendingCount: 1, errors: [apply.stderr || "SteamOS update failed"] };
     }

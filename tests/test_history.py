@@ -124,7 +124,7 @@ class TestHistory(unittest.TestCase):
         self.assertEqual(result[1]["source"], "steam")
 
     def test_corrupt_history_file_recovers(self):
-        """A corrupt history file should not crash — returns empty, then new entries work."""
+        """A corrupt history file should not crash - returns empty, then new entries work."""
         with open(self.p.history_path, "w") as f:
             f.write("NOT JSON!!!")
         result = run(self.p.get_history())

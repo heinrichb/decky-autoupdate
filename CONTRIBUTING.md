@@ -74,10 +74,10 @@ decky-autoupdate/
 
 ## Code Style
 
-- **Formatting**: Run `pnpm format` before committing — CI will reject unformatted code
+- **Formatting**: Run `pnpm format` before committing. CI will reject unformatted code.
 - TypeScript: strict mode, no `any` outside of `steamClient.ts`
 - Python: standard library only, async methods
-- Keep `steamClient.ts` as the single point of contact with `SteamClient` — no direct `SteamClient.*` calls elsewhere
+- Keep `steamClient.ts` as the single point of contact with `SteamClient`. No direct `SteamClient.*` calls elsewhere.
 
 ## Pull Requests
 

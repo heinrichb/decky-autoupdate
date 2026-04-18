@@ -1,5 +1,5 @@
 /**
- * Tests for AutoUpdateService — the core background service.
+ * Tests for AutoUpdateService - the core background service.
  *
  * Tests the logic that has caused real bugs:
  * - Settings defaults not propagating (checkOnWake undefined)
@@ -42,8 +42,7 @@ vi.mock("../steamClient", () => ({
 
 vi.mock("../providers", () => ({
   checkSteam: vi.fn().mockResolvedValue(mockResult("steam")),
-  checkFlatpakOnly: vi.fn().mockResolvedValue(mockResult("flatpak")),
-  applyFlatpak: vi.fn().mockResolvedValue(mockResult("flatpak")),
+  checkAndApplyFlatpak: vi.fn().mockResolvedValue(mockResult("flatpak")),
   isFlatpakAvailable: vi.fn().mockResolvedValue(true),
   isDeckyApiAvailable: vi.fn().mockResolvedValue(true),
   applyDeckyPluginUpdates: vi.fn().mockResolvedValue(mockResult("decky")),
@@ -112,8 +111,7 @@ async function getService(settingsOverrides: Record<string, any> = {}) {
 
   vi.doMock("../providers", () => ({
     checkSteam: vi.fn().mockResolvedValue(mockResult("steam")),
-    checkFlatpakOnly: vi.fn().mockResolvedValue(mockResult("flatpak")),
-    applyFlatpak: vi.fn().mockResolvedValue(mockResult("flatpak")),
+    checkAndApplyFlatpak: vi.fn().mockResolvedValue(mockResult("flatpak")),
     isFlatpakAvailable: vi.fn().mockResolvedValue(true),
     isDeckyApiAvailable: vi.fn().mockResolvedValue(true),
     applyDeckyPluginUpdates: vi.fn().mockResolvedValue(mockResult("decky")),
@@ -181,7 +179,7 @@ describe("AutoUpdateService", () => {
       const service = await getService();
       await service.start();
       service.stop();
-      // After stop, started flag is reset — can start again
+      // After stop, started flag is reset - can start again
       await service.start();
       expect(service.getState().settingsLoaded).toBe(true);
       service.stop();
@@ -274,7 +272,7 @@ describe("AutoUpdateService", () => {
       // Simulate game start
       capturedGameCallback!({ unAppID: 123, nInstanceID: 1, bRunning: true });
 
-      // Simulate game stop — should trigger check
+      // Simulate game stop - should trigger check
       capturedGameCallback!({ unAppID: 123, nInstanceID: 1, bRunning: false });
 
       // Let promises resolve
@@ -311,13 +309,13 @@ describe("AutoUpdateService", () => {
       capturedGameCallback!({ unAppID: 100, nInstanceID: 1, bRunning: true });
       capturedGameCallback!({ unAppID: 200, nInstanceID: 2, bRunning: true });
 
-      // Stop one — other still running
+      // Stop one - other still running
       capturedGameCallback!({ unAppID: 100, nInstanceID: 1, bRunning: false });
 
       await vi.advanceTimersByTimeAsync(0);
       expect((checkSteam as any).mock.calls.length).toBe(callsBefore);
 
-      // Stop the second — now check should trigger
+      // Stop the second - now check should trigger
       capturedGameCallback!({ unAppID: 200, nInstanceID: 2, bRunning: false });
 
       await vi.advanceTimersByTimeAsync(0);

@@ -9,13 +9,13 @@ const PREFIX = "[AutoUpdate]";
 
 // ── Logging ──────────────────────────────────────────────────
 
-/** Always emits — for important lifecycle events, results, and errors. */
+/** Always emits - for important lifecycle events, results, and errors. */
 export const log = (...args: unknown[]) => console.info(PREFIX, ...args);
 export const logWarn = (...args: unknown[]) => console.warn(PREFIX, ...args);
 export const logError = (...args: unknown[]) => console.error(PREFIX, ...args);
 
 /**
- * Debug logging — only emits when debug mode is enabled.
+ * Debug logging - only emits when debug mode is enabled.
  * Call setDebugEnabled() when settings load or change.
  */
 let _debugEnabled = false;

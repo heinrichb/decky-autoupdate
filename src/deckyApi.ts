@@ -50,7 +50,7 @@ const SELF_PLUGIN_NAME = "AutoUpdate";
  * Call a method on this plugin's Python backend via Decky's WS API.
  * This bypasses @decky/api's built-in call/callable which are unreliable.
  *
- * Calls are serialized — only one WS call is in flight at a time. Decky
+ * Calls are serialized so only one WS call is in flight at a time. Decky
  * Loader closes WebSocket connections when concurrent plugin method calls
  * arrive, so we queue them.
  */
@@ -177,6 +177,19 @@ export async function getAuthToken(): Promise<string> {
  * Opens a fresh connection per call for simplicity.
  */
 function callDeckyMethod<T = unknown>(route: string, args: unknown[] = [], timeoutMs = 30_000): Promise<T> {
+  return callDeckyMethodOnce<T>(route, args, timeoutMs).catch((e) => {
+    const msg = e instanceof Error ? e.message : "";
+    if (msg.includes("WebSocket closed before reply") || msg.includes("WebSocket error calling")) {
+      debug(`callDeckyMethod: retrying ${route} after stale-instance close`);
+      return new Promise<T>((resolve) => setTimeout(resolve, 2000)).then(() =>
+        callDeckyMethodOnce<T>(route, args, timeoutMs),
+      );
+    }
+    throw e;
+  });
+}
+
+function callDeckyMethodOnce<T = unknown>(route: string, args: unknown[] = [], timeoutMs = 30_000): Promise<T> {
   return new Promise((resolve, reject) => {
     const callId = nextId++;
     let ws: WebSocket | null = null;
@@ -201,12 +214,12 @@ function callDeckyMethod<T = unknown>(route: string, args: unknown[] = [], timeo
     getAuthToken()
       .then((token) => {
         if (settled) return;
-        debug(`callDeckyMethod: ${route} — got auth token, opening WS...`);
+        debug(`callDeckyMethod: ${route}: got auth token, opening WS...`);
 
         ws = new WebSocket(`${DECKY_WS}?auth=${token}`);
 
         ws.onopen = () => {
-          debug(`callDeckyMethod: ${route} — WS open, sending call`);
+          debug(`callDeckyMethod: ${route}: WS open, sending call`);
           ws!.send(JSON.stringify({ type: MSG_CALL, route, args, id: callId }));
         };
 
@@ -214,19 +227,19 @@ function callDeckyMethod<T = unknown>(route: string, args: unknown[] = [], timeo
           try {
             const msg = JSON.parse(event.data);
             if (msg.id !== callId) {
-              debug(`callDeckyMethod: ${route} — ignoring msg with id=${msg.id} (expected ${callId})`);
+              debug(`callDeckyMethod: ${route}: ignoring msg with id=${msg.id} (expected ${callId})`);
               return;
             }
 
             if (msg.type === MSG_REPLY) {
               settled = true;
               cleanup();
-              debug(`callDeckyMethod: ${route} — reply received in ${Date.now() - t0}ms`);
+              debug(`callDeckyMethod: ${route}: reply received in ${Date.now() - t0}ms`);
               resolve(msg.result as T);
             } else if (msg.type === MSG_ERROR) {
               settled = true;
               cleanup();
-              debug(`callDeckyMethod: ${route} — error response:`, msg.error);
+              debug(`callDeckyMethod: ${route}: error response:`, msg.error);
               reject(new Error(msg.error?.message || `Decky error on ${route}`));
             }
           } catch {
@@ -238,7 +251,7 @@ function callDeckyMethod<T = unknown>(route: string, args: unknown[] = [], timeo
           if (!settled) {
             settled = true;
             cleanup();
-            debug(`callDeckyMethod: ${route} — WebSocket error`);
+            debug(`callDeckyMethod: ${route}: WebSocket error`);
             reject(new Error(`WebSocket error calling ${route}`));
           }
         };
@@ -247,7 +260,7 @@ function callDeckyMethod<T = unknown>(route: string, args: unknown[] = [], timeo
           if (!settled) {
             settled = true;
             clearTimeout(timeout);
-            debug(`callDeckyMethod: ${route} — WebSocket closed unexpectedly`);
+            debug(`callDeckyMethod: ${route}: WebSocket closed unexpectedly`);
             reject(new Error(`WebSocket closed before reply for ${route}`));
           }
         };
@@ -256,7 +269,7 @@ function callDeckyMethod<T = unknown>(route: string, args: unknown[] = [], timeo
         if (!settled) {
           settled = true;
           clearTimeout(timeout);
-          debug(`callDeckyMethod: ${route} — auth token error:`, errorMessage(e));
+          debug(`callDeckyMethod: ${route}: auth token error:`, errorMessage(e));
           reject(e);
         }
       });
@@ -377,7 +390,7 @@ export async function checkDeckyLoaderUpdate(): Promise<{
       getDeckyVersion(),
       callDeckyMethod<{ hasUpdate: boolean; remoteVer?: string }>("updater/check_for_updates", [], 30_000),
     ]);
-    // The API may return a boolean or an object — handle both
+    // The API may return a boolean or an object. Handle both.
     const hasUpdate = typeof result === "boolean" ? result : (result?.hasUpdate ?? false);
     const remoteVersion = typeof result === "object" ? (result?.remoteVer ?? "") : "";
     debug("checkDeckyLoaderUpdate: current =", currentVersion, "hasUpdate =", hasUpdate, "remote =", remoteVersion);
@@ -461,7 +474,7 @@ export async function installPluginsAndConfirm(requests: PluginInstallRequest[])
                   id: confirmId,
                 }),
               );
-              // Resolve after confirm is sent — the actual install happens asynchronously
+              // Resolve after confirm is sent; the actual install happens asynchronously
               settled = true;
               clearTimeout(timeout);
               // Give it a moment for the confirm to be sent before closing

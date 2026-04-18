@@ -2,7 +2,7 @@
  * Abstraction layer over Steam's undocumented SteamClient JavaScript API.
  *
  * SteamClient is a global object injected by Steam's CEF context. Its methods
- * are not publicly documented — the signatures here were determined through CEF
+ * are not publicly documented - the signatures here were determined through CEF
  * remote debugging on SteamOS 3.x (Chrome 126, build 1773426488).
  *
  * All interaction with SteamClient is isolated in this file so that when Valve
@@ -258,7 +258,7 @@ export async function forceStartAllUpdates(): Promise<UpdateCheckResult> {
 
   const pending = await getPendingUpdates();
   log(
-    `forceStartAllUpdates — found ${pending.length} pending updates: ${pending.map((u) => `${u.name}(${u.appId})[${u.state}]`).join(", ") || "none"}`,
+    `forceStartAllUpdates - found ${pending.length} pending updates: ${pending.map((u) => `${u.name}(${u.appId})[${u.state}]`).join(", ") || "none"}`,
   );
   let forcedCount = 0;
 
@@ -295,7 +295,7 @@ export async function forceStartAllUpdates(): Promise<UpdateCheckResult> {
     return {
       source: "steam",
       timestamp,
-      pendingCount: recheck.length,
+      pendingCount: Math.max(pending.length, recheck.length),
       forcedCount,
       errors,
       updates: recheck,

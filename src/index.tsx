@@ -1,7 +1,8 @@
 import { definePlugin, toaster } from "@decky/api";
 import { ButtonItem, DropdownItem, PanelSection, PanelSectionRow, SliderField, ToggleField } from "@decky/ui";
-import { useState, useEffect, useCallback, ReactNode } from "react";
+import { useState, useEffect, useCallback, useRef, ReactNode } from "react";
 import { MdUpdate } from "react-icons/md";
+import { SourceStatus } from "./types";
 import { service, ServiceState } from "./autoUpdateService";
 import { getInstalledPlugins, InstalledPlugin } from "./deckyApi";
 import type { NotificationLevel, UpdateSource, UpdateCheckResult } from "./types";
@@ -33,6 +34,38 @@ function useServiceState(): ServiceState {
   }, []);
 
   return service.getState();
+}
+
+const SPINNER_STYLE: React.CSSProperties = {
+  display: "inline-block",
+  width: 14,
+  height: 14,
+  border: "2px solid currentColor",
+  borderTopColor: "transparent",
+  borderRadius: "50%",
+  marginRight: 6,
+  verticalAlign: "middle",
+};
+
+function Spinner() {
+  const ref = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    ref.current?.animate([{ transform: "rotate(0deg)" }, { transform: "rotate(360deg)" }], {
+      duration: 800,
+      iterations: Infinity,
+    });
+  }, []);
+  return <span ref={ref} style={SPINNER_STYLE} />;
+}
+
+function StatusButton({ status, label }: { status: SourceStatus; label: (s: SourceStatus) => string }) {
+  const busy = status !== "idle";
+  return (
+    <span>
+      {busy && <Spinner />}
+      {label(status)}
+    </span>
+  );
 }
 
 const DETAIL_LIST_STYLE = { fontSize: "0.8em", opacity: 0.7, maxHeight: 200, overflowY: "auto" as const };
@@ -124,7 +157,14 @@ function AutoUpdatePanel() {
                 }
               }}
             >
-              {anyChecking ? "Checking..." : "Check All"}
+              {anyChecking ? (
+                <span>
+                  <Spinner />
+                  Checking...
+                </span>
+              ) : (
+                "Check All"
+              )}
             </ButtonItem>
           </PanelSectionRow>
         )}
@@ -143,7 +183,7 @@ function AutoUpdatePanel() {
                 disabled={steamBusy}
                 onClick={() => handleCheck("steam")}
               >
-                {steamStatusLabel(state.steamStatus)}
+                <StatusButton status={state.steamStatus} label={steamStatusLabel} />
               </ButtonItem>
             </PanelSectionRow>
             {state.steamLastCheck && state.steamLastCheck.updates.length > 0 && (
@@ -182,7 +222,7 @@ function AutoUpdatePanel() {
                 disabled={flatpakBusy}
                 onClick={() => handleCheck("flatpak")}
               >
-                {flatpakStatusLabel(state.flatpakStatus)}
+                <StatusButton status={state.flatpakStatus} label={flatpakStatusLabel} />
               </ButtonItem>
             </PanelSectionRow>
             {state.flatpakLastCheck && state.flatpakLastCheck.flatpakUpdates.length > 0 && (
@@ -221,7 +261,7 @@ function AutoUpdatePanel() {
                 disabled={deckyBusy}
                 onClick={() => handleCheck("decky")}
               >
-                {deckyStatusLabel(state.deckyStatus)}
+                <StatusButton status={state.deckyStatus} label={deckyStatusLabel} />
               </ButtonItem>
             </PanelSectionRow>
             {state.deckyLastCheck && state.deckyLastCheck.deckyPluginUpdates.length > 0 && (
@@ -261,7 +301,7 @@ function AutoUpdatePanel() {
               disabled={deckyLoaderBusy}
               onClick={() => handleCheck("decky-loader")}
             >
-              {deckyLoaderStatusLabel(state.deckyLoaderStatus)}
+              <StatusButton status={state.deckyLoaderStatus} label={deckyLoaderStatusLabel} />
             </ButtonItem>
           </PanelSectionRow>
         )}
@@ -275,7 +315,7 @@ function AutoUpdatePanel() {
               disabled={steamosBusy}
               onClick={() => handleCheck("steamos")}
             >
-              {steamosStatusLabel(state.steamosStatus)}
+              <StatusButton status={state.steamosStatus} label={steamosStatusLabel} />
             </ButtonItem>
           </PanelSectionRow>
         )}

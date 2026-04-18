@@ -19,14 +19,12 @@ vi.mock("../steamClient", () => ({
 vi.mock("@decky/api", () => ({}));
 
 import {
-  checkFlatpakOnly,
-  applyFlatpak,
+  checkAndApplyFlatpak,
   isFlatpakAvailable,
   applyDeckyPluginUpdates,
   checkAndApplyDeckyLoaderUpdate,
   checkAndApplySteamos,
 } from "../providers";
-import { FlatpakUpdate } from "../types";
 
 const mockFindPluginUpdates = vi.fn();
 const mockInstallPluginsAndConfirm = vi.fn();
@@ -44,18 +42,20 @@ function mockBackendMethod(method: string, response: unknown) {
   });
 }
 
-describe("checkFlatpakOnly", () => {
-  it("returns updates on success", async () => {
-    mockBackendMethod("check_flatpak_updates", {
+describe("checkAndApplyFlatpak", () => {
+  it("returns updates when check-only (no auto-apply)", async () => {
+    mockBackendMethod("check_and_apply_flatpak", {
       success: true,
       updates: [
         { id: "org.mozilla.firefox", name: "Firefox", downloadSize: "50 MB" },
         { id: "com.spotify.Client", name: "Spotify", downloadSize: "30 MB" },
       ],
       error: "",
+      applied: false,
+      applyError: "",
     });
 
-    const result = await checkFlatpakOnly();
+    const result = await checkAndApplyFlatpak(false);
     expect(result.source).toBe("flatpak");
     expect(result.pendingCount).toBe(2);
     expect(result.forcedCount).toBe(0);
@@ -64,105 +64,83 @@ describe("checkFlatpakOnly", () => {
     expect(result.flatpakUpdates[0].name).toBe("Firefox");
   });
 
-  it("returns empty result with error on backend failure", async () => {
-    mockBackendMethod("check_flatpak_updates", {
+  it("returns forcedCount when auto-apply succeeds", async () => {
+    mockBackendMethod("check_and_apply_flatpak", {
+      success: true,
+      updates: [{ id: "org.mozilla.firefox", name: "Firefox", downloadSize: "50 MB" }],
+      error: "",
+      applied: true,
+      applyError: "",
+    });
+
+    const result = await checkAndApplyFlatpak(true);
+    expect(result.pendingCount).toBe(1);
+    expect(result.forcedCount).toBe(1);
+    expect(result.errors).toEqual([]);
+  });
+
+  it("returns check error on backend failure", async () => {
+    mockBackendMethod("check_and_apply_flatpak", {
       success: false,
       updates: [],
       error: "flatpak not responding",
+      applied: false,
+      applyError: "",
     });
 
-    const result = await checkFlatpakOnly();
+    const result = await checkAndApplyFlatpak(true);
     expect(result.pendingCount).toBe(0);
     expect(result.errors).toEqual(["flatpak not responding"]);
   });
 
-  it("returns empty result with default error when error string is empty", async () => {
-    mockBackendMethod("check_flatpak_updates", {
+  it("returns apply error when apply fails", async () => {
+    mockBackendMethod("check_and_apply_flatpak", {
+      success: true,
+      updates: [{ id: "org.mozilla.firefox", name: "Firefox", downloadSize: "50 MB" }],
+      error: "",
+      applied: false,
+      applyError: "permission denied",
+    });
+
+    const result = await checkAndApplyFlatpak(true);
+    expect(result.forcedCount).toBe(0);
+    expect(result.errors).toEqual(["permission denied"]);
+  });
+
+  it("returns default error when check error string is empty", async () => {
+    mockBackendMethod("check_and_apply_flatpak", {
       success: false,
       updates: [],
       error: "",
+      applied: false,
+      applyError: "",
     });
 
-    const result = await checkFlatpakOnly();
+    const result = await checkAndApplyFlatpak(true);
     expect(result.errors).toEqual(["Failed to check for Flatpak updates"]);
   });
 
-  it("catches exceptions and returns error result", async () => {
+  it("catches exceptions", async () => {
     mockCallPluginMethod.mockRejectedValue(new Error("network timeout"));
 
-    const result = await checkFlatpakOnly();
+    const result = await checkAndApplyFlatpak(true);
     expect(result.pendingCount).toBe(0);
     expect(result.errors).toEqual(["network timeout"]);
   });
 
   it("returns zero updates when backend returns empty list", async () => {
-    mockBackendMethod("check_flatpak_updates", {
+    mockBackendMethod("check_and_apply_flatpak", {
       success: true,
       updates: [],
       error: "",
+      applied: false,
+      applyError: "",
     });
 
-    const result = await checkFlatpakOnly();
+    const result = await checkAndApplyFlatpak(false);
     expect(result.pendingCount).toBe(0);
     expect(result.flatpakUpdates).toEqual([]);
     expect(result.errors).toEqual([]);
-  });
-});
-
-describe("applyFlatpak", () => {
-  const pending: FlatpakUpdate[] = [
-    { id: "org.mozilla.firefox", name: "Firefox", downloadSize: "50 MB" },
-    { id: "com.spotify.Client", name: "Spotify", downloadSize: "30 MB" },
-  ];
-
-  it("returns forcedCount equal to pending count on success", async () => {
-    mockBackendMethod("apply_flatpak_updates", {
-      success: true,
-      stdout: "ok",
-      stderr: "",
-      returncode: 0,
-    });
-
-    const result = await applyFlatpak(pending);
-    expect(result.source).toBe("flatpak");
-    expect(result.pendingCount).toBe(2);
-    expect(result.forcedCount).toBe(2);
-    expect(result.errors).toEqual([]);
-    expect(result.flatpakUpdates).toBe(pending);
-  });
-
-  it("returns zero forcedCount with error on failure", async () => {
-    mockBackendMethod("apply_flatpak_updates", {
-      success: false,
-      stdout: "",
-      stderr: "permission denied",
-      returncode: 1,
-    });
-
-    const result = await applyFlatpak(pending);
-    expect(result.forcedCount).toBe(0);
-    expect(result.errors).toEqual(["permission denied"]);
-  });
-
-  it("uses default error when stderr is empty", async () => {
-    mockBackendMethod("apply_flatpak_updates", {
-      success: false,
-      stdout: "",
-      stderr: "",
-      returncode: 1,
-    });
-
-    const result = await applyFlatpak(pending);
-    expect(result.errors).toEqual(["Flatpak update failed"]);
-  });
-
-  it("catches exceptions", async () => {
-    mockCallPluginMethod.mockRejectedValue(new Error("subprocess crashed"));
-
-    const result = await applyFlatpak(pending);
-    expect(result.forcedCount).toBe(0);
-    expect(result.errors).toEqual(["subprocess crashed"]);
-    expect(result.pendingCount).toBe(2);
   });
 });
 
