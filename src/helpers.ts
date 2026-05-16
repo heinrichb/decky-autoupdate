@@ -207,10 +207,15 @@ export const COLOR_WARNING = "#fca311";
 export const COLOR_ERROR = "#e63946";
 export const COLOR_MUTED = "#888";
 
-export function statusColor(result: { errors: string[]; pendingCount: number } | null): string {
+export function statusColor(
+  result: { errors: string[]; pendingCount: number; forcedCount: number } | null,
+): string {
   if (!result) return COLOR_MUTED;
   if (result.errors.length > 0) return COLOR_ERROR;
-  if (result.pendingCount > 0) return COLOR_WARNING;
+  // pendingCount > 0 with forcedCount > 0 means "we found updates and acted on
+  // all of them" — that's a success, not a warning. Yellow is reserved for
+  // genuine open problems (updates exist but we couldn't action them).
+  if (result.pendingCount > 0 && result.forcedCount === 0) return COLOR_WARNING;
   return COLOR_SUCCESS;
 }
 

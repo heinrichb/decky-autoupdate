@@ -8,7 +8,6 @@ import { PLUGIN_VERSION } from "./version";
 import { getInstalledPlugins, InstalledPlugin } from "./deckyApi";
 import type { NotificationLevel, UpdateSource, UpdateCheckResult } from "./types";
 import {
-  formatBytes,
   statusColor,
   compactStatusText,
   steamStatusLabel,
@@ -69,8 +68,6 @@ function StatusButton({ status, label }: { status: SourceStatus; label: (s: Sour
   );
 }
 
-const DETAIL_LIST_STYLE = { fontSize: "0.8em", opacity: 0.7, maxHeight: 200, overflowY: "auto" as const };
-
 const NOTIFICATION_OPTIONS = [
   { data: "off" as NotificationLevel, label: "Off" },
   { data: "updates-only" as NotificationLevel, label: "Updates only" },
@@ -86,9 +83,6 @@ function AutoUpdatePanel() {
   }, []);
 
   const [expanded, setExpanded] = useState(false);
-  const [showSteamUpdates, setShowSteamUpdates] = useState(false);
-  const [showFlatpakUpdates, setShowFlatpakUpdates] = useState(false);
-  const [showDeckyUpdates, setShowDeckyUpdates] = useState(false);
   const [showBlacklist, setShowBlacklist] = useState(false);
   const [installedPlugins, setInstalledPlugins] = useState<InstalledPlugin[]>([]);
 
@@ -187,29 +181,6 @@ function AutoUpdatePanel() {
                 <StatusButton status={state.steamStatus} label={steamStatusLabel} />
               </ButtonItem>
             </PanelSectionRow>
-            {state.steamLastCheck && state.steamLastCheck.updates.length > 0 && (
-              <>
-                <PanelSectionRow>
-                  <ButtonItem layout="below" onClick={() => setShowSteamUpdates(!showSteamUpdates)}>
-                    {showSteamUpdates ? "Hide details" : `Show ${state.steamLastCheck.updates.length} updates`}
-                  </ButtonItem>
-                </PanelSectionRow>
-                {showSteamUpdates && (
-                  <PanelSectionRow>
-                    <div style={DETAIL_LIST_STYLE}>
-                      {state.steamLastCheck.updates.map((u) => (
-                        <div key={u.appId} style={{ marginBottom: 4 }}>
-                          <div>{u.name}</div>
-                          <div style={{ opacity: 0.6 }}>
-                            {u.state} {"\u2014"} {formatBytes(u.bytesToDownload)}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </PanelSectionRow>
-                )}
-              </>
-            )}
           </>
         )}
 
@@ -226,29 +197,6 @@ function AutoUpdatePanel() {
                 <StatusButton status={state.flatpakStatus} label={flatpakStatusLabel} />
               </ButtonItem>
             </PanelSectionRow>
-            {state.flatpakLastCheck && state.flatpakLastCheck.flatpakUpdates.length > 0 && (
-              <>
-                <PanelSectionRow>
-                  <ButtonItem layout="below" onClick={() => setShowFlatpakUpdates(!showFlatpakUpdates)}>
-                    {showFlatpakUpdates
-                      ? "Hide details"
-                      : `Show ${state.flatpakLastCheck.flatpakUpdates.length} updates`}
-                  </ButtonItem>
-                </PanelSectionRow>
-                {showFlatpakUpdates && (
-                  <PanelSectionRow>
-                    <div style={DETAIL_LIST_STYLE}>
-                      {state.flatpakLastCheck.flatpakUpdates.map((u) => (
-                        <div key={u.id} style={{ marginBottom: 4 }}>
-                          <div>{u.name}</div>
-                          <div style={{ opacity: 0.6 }}>{u.downloadSize}</div>
-                        </div>
-                      ))}
-                    </div>
-                  </PanelSectionRow>
-                )}
-              </>
-            )}
           </>
         )}
 
@@ -265,31 +213,6 @@ function AutoUpdatePanel() {
                 <StatusButton status={state.deckyStatus} label={deckyStatusLabel} />
               </ButtonItem>
             </PanelSectionRow>
-            {state.deckyLastCheck && state.deckyLastCheck.deckyPluginUpdates.length > 0 && (
-              <>
-                <PanelSectionRow>
-                  <ButtonItem layout="below" onClick={() => setShowDeckyUpdates(!showDeckyUpdates)}>
-                    {showDeckyUpdates
-                      ? "Hide details"
-                      : `Show ${state.deckyLastCheck.deckyPluginUpdates.length} updates`}
-                  </ButtonItem>
-                </PanelSectionRow>
-                {showDeckyUpdates && (
-                  <PanelSectionRow>
-                    <div style={DETAIL_LIST_STYLE}>
-                      {state.deckyLastCheck.deckyPluginUpdates.map((u) => (
-                        <div key={u.name} style={{ marginBottom: 4 }}>
-                          <div>{u.name}</div>
-                          <div style={{ opacity: 0.6 }}>
-                            {u.currentVersion} {"\u2192"} {u.newVersion}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </PanelSectionRow>
-                )}
-              </>
-            )}
           </>
         )}
 

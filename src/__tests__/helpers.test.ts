@@ -64,19 +64,31 @@ describe("statusColor", () => {
   });
 
   it("returns red when errors present", () => {
-    expect(statusColor({ errors: ["something broke"], pendingCount: 0 })).toBe("#e63946");
+    expect(statusColor({ errors: ["something broke"], pendingCount: 0, forcedCount: 0 })).toBe("#e63946");
   });
 
-  it("returns yellow when pending updates exist", () => {
-    expect(statusColor({ errors: [], pendingCount: 3 })).toBe("#fca311");
+  it("returns yellow when pending updates exist and none were acted on", () => {
+    expect(statusColor({ errors: [], pendingCount: 3, forcedCount: 0 })).toBe("#fca311");
   });
 
-  it("returns green when clean", () => {
-    expect(statusColor({ errors: [], pendingCount: 0 })).toBe("#2a9d8f");
+  it("returns green when pending updates were all successfully started/applied", () => {
+    // "Started 5 of 5 downloads" is a success, not a warning — yellow is
+    // reserved for items the plugin couldn't act on.
+    expect(statusColor({ errors: [], pendingCount: 5, forcedCount: 5 })).toBe("#2a9d8f");
+  });
+
+  it("returns green when no pending updates (up to date)", () => {
+    expect(statusColor({ errors: [], pendingCount: 0, forcedCount: 0 })).toBe("#2a9d8f");
+  });
+
+  it("returns green on partial success (some forced, no errors)", () => {
+    // If errors is empty but only some forced, treat as success — caller can
+    // surface the partial via the summary text.
+    expect(statusColor({ errors: [], pendingCount: 5, forcedCount: 3 })).toBe("#2a9d8f");
   });
 
   it("prioritizes errors over pending", () => {
-    expect(statusColor({ errors: ["err"], pendingCount: 5 })).toBe("#e63946");
+    expect(statusColor({ errors: ["err"], pendingCount: 5, forcedCount: 0 })).toBe("#e63946");
   });
 });
 
