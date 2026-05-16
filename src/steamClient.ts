@@ -470,7 +470,9 @@ export function getPendingUpdates(): Promise<PendingUpdate[]> {
                 `rc=${it.update_result ?? "?"}|b=${it.buildid}->${it.target_buildid}`
               );
             });
-            log("getPendingUpdates: ALL items compact dump:\n  " + compact.join("\n  "));
+            // Diagnostic only — gated behind debug to avoid log noise in normal operation.
+            // Used for diagnosing pendingCount mismatches between plugin and Steam UI.
+            debug("getPendingUpdates: ALL items compact dump:\n  " + compact.join("\n  "));
           } catch (e) {
             logWarn("getPendingUpdates: failed to log sample item:", errorMessage(e));
           }
@@ -687,7 +689,10 @@ export async function forceStartAllUpdates(): Promise<UpdateCheckResult> {
         await new Promise((r) => setTimeout(r, 500));
         const postItems = await getRawDownloadItems();
         const post = postItems.find((it) => it.appid === firstScheduledId);
-        log(
+        // Diagnostic only — gated behind debug. Compares with the pre-force
+        // compact dump to confirm fields actually changed (use this when a
+        // force-start appears to silently fail in the future).
+        debug(
           `POST-FORCE raw DownloadItem for appid=${firstScheduledId}:`,
           post ? JSON.stringify(post) : "(no longer in download list)",
         );
@@ -727,10 +732,13 @@ export async function forceStartAllUpdates(): Promise<UpdateCheckResult> {
       }
     }
 
-    // Last-resort pass: items that survived CEF API retries are blocked by
-    // the appmanifest_<appid>.acf `ScheduledAutoUpdate` field. Have the
-    // backend (running as root) clear that field directly and hand the appid
-    // to the running Steam client via `steam steam://updateapp/<id>`.
+    // Last-resort pass: kept as a safety net for the case where Steam ships
+    // another API regression and the CEF retry path stops working. Should
+    // not fire in normal operation — the QueueAppUpdate + ResumeAppUpdate
+    // calls (with the LOCAL_CLIENT_ID second arg) transition items out of
+    // scheduled state first pass on current Steam builds. If this branch
+    // ever fires in real telemetry, that's a signal Valve broke the CEF
+    // surface again and the fallback earned its keep.
     if (stillScheduled.length > 0) {
       logWarn(
         `${stillScheduled.length} update(s) still stuck after SteamClient API retries — falling back to backend manifest edit + steam URL`,

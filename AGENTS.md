@@ -104,28 +104,45 @@ Orphan Wine prefixes for uninstalled games live at
 `steamapps/compatdata/<appid>/`. These may contain save files; only remove
 if Steam Cloud has the saves OR the user explicitly says.
 
-## Known Steam API regression: `deferred_time` cannot be cleared from CEF
-Post Steam-update (May 2026 builds), apps with `deferred_time > 0` (scheduled for off-peak) **cannot be transitioned out of "scheduled" state** through any SteamClient API we can reach from the CEF context. The following all succeed (no exception, no error) but leave `deferred_time` and `queue_index` unchanged:
+## SteamClient.Downloads.* — the two-arg contract (load-bearing)
 
-- `Downloads.EnableAllDownloads()`
-- `Downloads.SuspendDownloadThrottling(true)`
-- `Downloads.SetQueueIndex(appId, 0)`
-- `Downloads.MoveAppUpdateUp(appId)`
-- `Downloads.QueueAppUpdate(appId)`
-- `Downloads.PauseAppUpdate(appId)` + `Downloads.ResumeAppUpdate(appId)`
-- `Apps.SetAppAutoUpdateBehavior(appId, 0..2)`
-- `Apps.SetAppBackgroundDownloadsBehavior(appId, 0..2)`
+All mutating methods on `SteamClient.Downloads` take a `remoteClientId: string`
+as their **last** argument. Pass `"0"` for the local Steam client. **Calls
+made without the second arg silently no-op** — no exception, no error, no
+log line. This is the single most painful gotcha in the API; if you observe
+"the call ran but state didn't change", check the arity first.
 
-Diagnostic evidence in logs:
-- `getPendingUpdates: raw scheduled DownloadItem dump` shows the pre-force state
-- `POST-FORCE raw DownloadItem` shows the post-force state — fields are byte-for-byte identical
+Verified call signatures (Steam build ~1778921000, May 2026):
 
-The toast/UI message now correctly reports "0 of N updates started" instead of falsely claiming success. The 3-item set that already had `state: "queued"` does start downloading; only the "scheduled" ones are unreachable.
+```
+ResumeAppUpdate(appId, remoteClientId)
+PauseAppUpdate(appId, remoteClientId)
+QueueAppUpdate(appId, remoteClientId)
+MoveAppUpdateUp(appId, remoteClientId)
+MoveAppUpdateDown(appId, remoteClientId)
+SetQueueIndex(appId, index, remoteClientId)       // 3-arg form
+RemoveFromDownloadList(appId, remoteClientId)
+EnableAllDownloads(enable, remoteClientId)
+SuspendDownloadThrottling(suspend, remoteClientId)
+SuspendLanPeerContent(suspend, remoteClientId)
+SetLaunchOnUpdateComplete(appIdOrLaunchCode)      // 1-arg exception
+```
 
-Possible next angles if revisiting:
-- Probe full method surface of `Browser`, `Messaging`, `SharedConnection`, `WebUITransport` — Steam's own "Update Now" button may call through one of these rather than `Downloads.*`
-- Decompile/inspect SP's React store to find the action dispatched on "Update Now" click
-- Try invoking the backend `steam` command line directly (`steam steam://updateapp/<appid>`)
+Working force-start recipe for an item stuck in `scheduled` state:
+
+```ts
+const LOCAL = "0";
+SteamClient.Apps.SetAppAutoUpdateBehavior(appId, 0);     // "always update"
+SteamClient.Downloads.QueueAppUpdate(appId, LOCAL);      // clear scheduled state
+SteamClient.Downloads.ResumeAppUpdate(appId, LOCAL);     // start the download
+```
+
+The recipe is in `src/steamClient.ts` `forceStartUpdate()`. Discovered via
+reading the Steam UI bundle (`/home/deck/.local/share/Steam/steamui/chunk~*.js`)
+where every call site of these methods passes `h.hj.CurrentViewingRemoteClientID`
+as the second arg, and the local-self constant `n.O` resolves to the string `"0"`.
+
+Full reference: `workspaces/general/docs/reference/steam/cef-api.md`.
 
 ## Git workflow
 - Work happens on `develop` branch
