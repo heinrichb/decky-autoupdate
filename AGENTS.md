@@ -13,16 +13,21 @@ This file is a living document. Keep it up to date throughout development.
 
 ## Current Task
 
-**Milestone D (bug fixes + UI polish)**: Deployed 2026-04-14, user is monitoring over longer periods.
+**Milestone E (post-Steam-update fixes)**: Deployed 2026-05-15.
 
 ### Changes in this milestone:
-1. **Flatpak partial-scope failure**: `check_and_apply_flatpak` no longer blocks apply when one scope's check fails but updates exist. Frontend prioritizes apply errors over check errors (`providers.ts:83-88`).
-2. **Stale-instance IPC retry**: `callDeckyMethod` in `deckyApi.ts` retries once (2s delay) when Decky's WS router closes the connection due to stale plugin instance. This is the most impactful fix - was causing all flatpak calls to fail after plugin reloads.
-3. **Steam count mismatch**: `forceStartAllUpdates` recheck uses `Math.max(pending.length, recheck.length)` for `pendingCount` so "applied X of Y" never shows Y < X (`steamClient.ts:298`).
-4. **Wake delay**: 8s delay in `handleWake` before running checks, letting Steam's download manager re-initialize (`autoUpdateService.ts:349-350`).
-5. **Loading spinner**: Animated CSS spinner on all check buttons using Web Animations API (CSS @keyframes don't work in Steam CEF). `Spinner` and `StatusButton` components in `index.tsx`.
+1. **Version injection at build time**: `rollup.config.js` uses `@rollup/plugin-replace` to inject `__PLUGIN_VERSION__` from `package.json`. New `src/version.ts` exposes `PLUGIN_VERSION`. Backend reads version from `plugin.json` / `package.json` at startup.
+2. **Startup logging**: Plugin version, debug state, Decky Loader version, wake/game detection methods all logged at info level so post-deploy you can confirm exactly what's running. Backend log line: `AutoUpdate v{version} loaded | debug={ON|OFF} | settings={path}`.
+3. **`trace` log level**: New `trace()` in `helpers.ts` — same gate as `debug` but CEF-console-only, never IPC'd. The 5 per-IPC-call lifecycle logs in `deckyApi.ts` converted to `trace`, breaking a 5x logging cascade that was saturating the Decky WS channel and causing apparent "stuck" states for minutes at a time.
+4. **Decky Loader version**: Read directly from `/home/deck/homebrew/services/.loader.version` via new backend `get_decky_version` IPC. Decky's `updater/get_version` route returns an error on current builds.
+5. **Decky plugin install retry + payload shape**: Wrapped `installPluginsAndConfirm` in a retry-once layer for WS-closed-before-confirmation. New `extractRequestId()` handles current Decky's payload shape where `msg.args[0]` is the request_id string directly (not `msg.args[0].request_id` as before).
+6. **Source-specific verb in update summary**: `helpers.ts` `actionVerb()` returns "started" for steam (we trigger a download, Steam runs it async), "applied" for flatpak/decky (we ran the install), "staged" for steamos (needs reboot), "updated" for decky-loader. Tests in `helpers.test.ts` cover the steam/steamos cases.
+7. **Steam: accurate forced count**: `forceStartUpdate` no longer counts items where "we called the API without throwing" — `forceStartAllUpdates` now reports `forcedCount` = items that actually transitioned out of scheduled. Was reporting "19 of 19 applied" when 16 were still stuck.
+8. **Steam scheduled→queued**: Tried 8+ Downloads/Apps APIs (`SetQueueIndex`, `MoveAppUpdateUp`, `QueueAppUpdate`, `Pause`/`Resume`, `SetAppAutoUpdateBehavior`, `SetAppBackgroundDownloadsBehavior`, `SuspendDownloadThrottling`, `EnableAllDownloads`). All succeed but leave `deferred_time` and `queue_index` unchanged. See "Known Steam API regression" section below.
+9. **UI**: "Steam" → "Steam Apps" label (ambiguous now that SteamOS is a separate category). Diagnostics dump button + version display at bottom of Advanced section.
 
 ### Previous milestones:
+- **Milestone D (bug fixes + UI polish)**: Deployed 2026-04-14
 - **Milestone C (reliability + new update sources)**: Deployed 2026-04-12
 - **Milestone B (Decky plugin auto-updates)**: Implemented on `feature/decky-plugin-updates`
 - **Milestone A (game-aware checks)**: Deployed to develop 2026-04-10
@@ -53,6 +58,36 @@ This file is a living document. Keep it up to date throughout development.
 - `journalctl -u plugin_loader` for Python backend errors
 - CEF remote debugger (chrome://inspect) - look for `[AutoUpdate]` in console
 - Wake detection logs its method on startup: "SteamClient.System.RegisterForOnResumeFromSuspend" or "falling back to heartbeat polling"
+- **Version is logged at startup** (backend + frontend) — confirm you're looking at the build you just deployed
+- **Diagnostics dump button** in the Advanced section produces a complete state snapshot (version, settings, availability, last check per source, history count, Decky Loader version) — copy to clipboard for sharing
+
+## Log levels and `trace` vs `debug`
+- `log`, `logWarn`, `logError` (`helpers.ts`): always emit, also IPC'd to the backend `.log` file via `log_frontend_message`. Use for events the user might need to see.
+- `debug` (`helpers.ts`): gated by `debugLogging` setting, IPC'd to backend when enabled. Use for one-shot lifecycle diagnostics.
+- `trace` (`helpers.ts`): gated by `debugLogging`, CEF-console-only — **never** crosses IPC. Use for high-frequency events (per-IPC-call tracing, per-event-callback). Sending these through IPC caused a 5x cascade (each log was itself an IPC call generating 4 more logs) that saturated the WS channel and made legitimate calls hang for minutes. `callDeckyMethod` internal lifecycle logs are `trace`, not `debug`, for this reason.
+
+## Known Steam API regression: `deferred_time` cannot be cleared from CEF
+Post Steam-update (May 2026 builds), apps with `deferred_time > 0` (scheduled for off-peak) **cannot be transitioned out of "scheduled" state** through any SteamClient API we can reach from the CEF context. The following all succeed (no exception, no error) but leave `deferred_time` and `queue_index` unchanged:
+
+- `Downloads.EnableAllDownloads()`
+- `Downloads.SuspendDownloadThrottling(true)`
+- `Downloads.SetQueueIndex(appId, 0)`
+- `Downloads.MoveAppUpdateUp(appId)`
+- `Downloads.QueueAppUpdate(appId)`
+- `Downloads.PauseAppUpdate(appId)` + `Downloads.ResumeAppUpdate(appId)`
+- `Apps.SetAppAutoUpdateBehavior(appId, 0..2)`
+- `Apps.SetAppBackgroundDownloadsBehavior(appId, 0..2)`
+
+Diagnostic evidence in logs:
+- `getPendingUpdates: raw scheduled DownloadItem dump` shows the pre-force state
+- `POST-FORCE raw DownloadItem` shows the post-force state — fields are byte-for-byte identical
+
+The toast/UI message now correctly reports "0 of N updates started" instead of falsely claiming success. The 3-item set that already had `state: "queued"` does start downloading; only the "scheduled" ones are unreachable.
+
+Possible next angles if revisiting:
+- Probe full method surface of `Browser`, `Messaging`, `SharedConnection`, `WebUITransport` — Steam's own "Update Now" button may call through one of these rather than `Downloads.*`
+- Decompile/inspect SP's React store to find the action dispatched on "Update Now" click
+- Try invoking the backend `steam` command line directly (`steam steam://updateapp/<appid>`)
 
 ## Git workflow
 - Work happens on `develop` branch

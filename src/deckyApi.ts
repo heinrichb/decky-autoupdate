@@ -15,7 +15,7 @@
  * only require updating this module.
  */
 
-import { log, logWarn, logError, debug, errorMessage } from "./helpers";
+import { log, logWarn, logError, debug, trace, errorMessage, isOnline } from "./helpers";
 
 const DECKY_HOST = "http://127.0.0.1:1337";
 const DECKY_WS = "ws://127.0.0.1:1337/ws";
@@ -195,7 +195,7 @@ function callDeckyMethodOnce<T = unknown>(route: string, args: unknown[] = [], t
     let ws: WebSocket | null = null;
     let settled = false;
 
-    debug(`callDeckyMethod: ${route} (id=${callId}, timeout=${timeoutMs}ms)`);
+    trace(`callDeckyMethod: ${route} (id=${callId}, timeout=${timeoutMs}ms)`);
     const t0 = Date.now();
 
     const timeout = setTimeout(() => {
@@ -214,12 +214,12 @@ function callDeckyMethodOnce<T = unknown>(route: string, args: unknown[] = [], t
     getAuthToken()
       .then((token) => {
         if (settled) return;
-        debug(`callDeckyMethod: ${route}: got auth token, opening WS...`);
+        trace(`callDeckyMethod: ${route}: got auth token, opening WS...`);
 
         ws = new WebSocket(`${DECKY_WS}?auth=${token}`);
 
         ws.onopen = () => {
-          debug(`callDeckyMethod: ${route}: WS open, sending call`);
+          trace(`callDeckyMethod: ${route}: WS open, sending call`);
           ws!.send(JSON.stringify({ type: MSG_CALL, route, args, id: callId }));
         };
 
@@ -227,14 +227,14 @@ function callDeckyMethodOnce<T = unknown>(route: string, args: unknown[] = [], t
           try {
             const msg = JSON.parse(event.data);
             if (msg.id !== callId) {
-              debug(`callDeckyMethod: ${route}: ignoring msg with id=${msg.id} (expected ${callId})`);
+              trace(`callDeckyMethod: ${route}: ignoring msg with id=${msg.id} (expected ${callId})`);
               return;
             }
 
             if (msg.type === MSG_REPLY) {
               settled = true;
               cleanup();
-              debug(`callDeckyMethod: ${route}: reply received in ${Date.now() - t0}ms`);
+              trace(`callDeckyMethod: ${route}: reply received in ${Date.now() - t0}ms`);
               resolve(msg.result as T);
             } else if (msg.type === MSG_ERROR) {
               settled = true;
@@ -282,7 +282,15 @@ function callDeckyMethodOnce<T = unknown>(route: string, args: unknown[] = [], t
 export async function getInstalledPlugins(): Promise<InstalledPlugin[]> {
   try {
     const result = await callDeckyMethod<InstalledPlugin[]>("loader/get_plugins");
-    return result || [];
+    const plugins = result || [];
+    debug("getInstalledPlugins: received", plugins.length, "plugins");
+    if (plugins.length > 0) {
+      const sample = plugins[0];
+      if (typeof sample?.name !== "string" || typeof sample?.version !== "string") {
+        logWarn("getInstalledPlugins: unexpected plugin shape - keys:", Object.keys(sample).join(", "));
+      }
+    }
+    return plugins;
   } catch (e) {
     logError("Failed to get installed plugins:", e);
     return [];
@@ -294,11 +302,23 @@ export async function getInstalledPlugins(): Promise<InstalledPlugin[]> {
  */
 export async function getStorePlugins(): Promise<StorePlugin[]> {
   try {
+    if (!isOnline()) {
+      logWarn("getStorePlugins: device appears offline, skipping store fetch");
+      throw new Error("Device is offline");
+    }
+    debug("getStorePlugins: fetching from", STORE_URL);
     const resp = await fetch(STORE_URL, {
       signal: timeoutSignal(15_000),
     });
+    debug("getStorePlugins: HTTP", resp.status, resp.statusText);
     if (!resp.ok) throw new Error(`Store request failed: ${resp.status}`);
-    return resp.json();
+    const data = await resp.json();
+    if (!Array.isArray(data)) {
+      logWarn("getStorePlugins: response is not an array, type:", typeof data);
+      return [];
+    }
+    debug("getStorePlugins:", data.length, "plugins in store");
+    return data;
   } catch (e) {
     logError("Failed to fetch store plugins:", e);
     throw e;
@@ -335,33 +355,42 @@ export async function findPluginUpdates(blacklist: string[]): Promise<{
   const details: { name: string; currentVersion: string; newVersion: string }[] = [];
 
   for (const plugin of installed) {
-    // Skip ourselves
     if (plugin.name === SELF_PLUGIN_NAME) continue;
-
-    // Skip blacklisted
     if (blacklistSet.has(plugin.name.toLowerCase())) continue;
-
-    // Skip disabled plugins
     if (plugin.disabled) continue;
 
     const storeEntry = storeMap.get(plugin.name);
     if (!storeEntry || storeEntry.versions.length === 0) continue;
 
-    const latest = storeEntry.versions[0];
-    if (compareVersions(plugin.version, latest.name) < 0) {
-      updates.push({
-        name: plugin.name,
-        artifact: getArtifactUrl(latest),
-        version: latest.name,
-        hash: latest.hash,
-        install_type: 2, // UPDATE
-      });
-      details.push({
-        name: plugin.name,
-        currentVersion: plugin.version,
-        newVersion: latest.name,
-      });
+    try {
+      const latest = storeEntry.versions[0];
+      const cmp = compareVersions(plugin.version, latest.name);
+      debug(`findPluginUpdates: ${plugin.name} installed=${plugin.version} store=${latest.name} cmp=${cmp}`);
+      if (cmp < 0) {
+        updates.push({
+          name: plugin.name,
+          artifact: getArtifactUrl(latest),
+          version: latest.name,
+          hash: latest.hash,
+          install_type: 2, // UPDATE
+        });
+        details.push({
+          name: plugin.name,
+          currentVersion: plugin.version,
+          newVersion: latest.name,
+        });
+      }
+    } catch (e) {
+      logWarn(`findPluginUpdates: version comparison failed for ${plugin.name}:`, errorMessage(e));
     }
+  }
+
+  log(
+    `findPluginUpdates: ${installed.length} installed, ${store.length} in store, ${updates.length} update(s) found` +
+      (blacklist.length > 0 ? ` (blacklist: ${blacklist.join(", ")})` : ""),
+  );
+  if (updates.length > 0) {
+    log("findPluginUpdates:", details.map((d) => `${d.name} ${d.currentVersion}->${d.newVersion}`).join(", "));
   }
 
   return { updates, details };
@@ -371,8 +400,17 @@ export async function findPluginUpdates(blacklist: string[]): Promise<{
 
 /**
  * Get the current Decky Loader version.
+ *
+ * Prefers our own backend (reads `/home/deck/homebrew/services/.loader.version`)
+ * because Decky's `updater/get_version` route errors on current builds.
  */
 export async function getDeckyVersion(): Promise<string> {
+  try {
+    const v = await callPluginMethod<string>("get_decky_version", 5_000);
+    if (v) return v;
+  } catch {
+    /* fall through to Decky's API */
+  }
   return callDeckyMethod<string>("updater/get_version");
 }
 
@@ -420,7 +458,67 @@ export async function applyDeckyLoaderUpdate(): Promise<void> {
  */
 export async function installPluginsAndConfirm(requests: PluginInstallRequest[]): Promise<void> {
   if (requests.length === 0) return;
+  try {
+    await installPluginsAndConfirmOnce(requests);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "";
+    // Stale-instance pattern: Decky's WS router closes the connection when the
+    // plugin instance id changes (e.g. AutoUpdate itself getting reloaded during
+    // the install of another plugin). Retry once with a fresh connection.
+    if (msg.includes("WebSocket closed during install") || msg.includes("WebSocket error during install")) {
+      log("Install WS closed before confirmation — retrying once after 3s");
+      await new Promise((r) => setTimeout(r, 3000));
+      await installPluginsAndConfirmOnce(requests);
+      return;
+    }
+    throw e;
+  }
+}
 
+/**
+ * Pull the install `request_id` out of Decky's prompt event payload.
+ *
+ * Decky has changed the shape across versions. We try, in order:
+ *   1. msg.args[0].request_id     (older builds)
+ *   2. msg.args.request_id        (newer builds where args is an object)
+ *   3. msg.data.request_id        (alternate envelope)
+ *   4. msg.params[0].request_id   (some forks)
+ *   5. msg.args[0]                (if args[0] is a string/number request_id directly)
+ *
+ * Returns the request_id (string or number), or null if none of the shapes match.
+ */
+function extractRequestId(msg: Record<string, unknown>): string | number | null {
+  const tryGet = (v: unknown): string | number | null => {
+    if (v == null) return null;
+    if (typeof v === "string" || typeof v === "number") return v;
+    if (typeof v === "object") {
+      const r = (v as Record<string, unknown>).request_id;
+      if (typeof r === "string" || typeof r === "number") return r;
+    }
+    return null;
+  };
+
+  const args = msg.args as unknown;
+  if (Array.isArray(args)) {
+    const fromArgs0 = tryGet(args[0]);
+    if (fromArgs0 != null) return fromArgs0;
+  }
+  const fromArgsObj = tryGet(args);
+  if (fromArgsObj != null) return fromArgsObj;
+
+  const fromData = tryGet(msg.data);
+  if (fromData != null) return fromData;
+
+  const params = msg.params as unknown;
+  if (Array.isArray(params)) {
+    const fromParams0 = tryGet(params[0]);
+    if (fromParams0 != null) return fromParams0;
+  }
+
+  return null;
+}
+
+async function installPluginsAndConfirmOnce(requests: PluginInstallRequest[]): Promise<void> {
   debug("installPluginsAndConfirm: getting auth token...");
   const token = await getAuthToken();
   const callId = nextId++;
@@ -462,7 +560,13 @@ export async function installPluginsAndConfirm(requests: PluginInstallRequest[])
             eventName === "loader/add_multiple_plugins_install_prompt" ||
             eventName === "loader/add_plugin_install_prompt"
           ) {
-            const requestId = msg.args?.[0]?.request_id;
+            // Dump the full event payload so we can adapt if Decky changes the shape.
+            // Past observations: msg.args[0].request_id. New builds may put it elsewhere.
+            log(
+              `Install prompt received (${eventName}). Full payload:`,
+              JSON.stringify({ args: msg.args, data: msg.data, params: msg.params }),
+            );
+            const requestId = extractRequestId(msg);
             if (requestId != null) {
               log(`Auto-confirming install request ${requestId}`);
               const confirmId = nextId++;
@@ -483,6 +587,11 @@ export async function installPluginsAndConfirm(requests: PluginInstallRequest[])
                 debug("installPluginsAndConfirm: confirmed and closed WS");
                 resolve();
               }, 1000);
+            } else {
+              logWarn(
+                `Install prompt arrived but request_id could not be extracted. Event payload keys: ${Object.keys(msg).join(", ")}. ` +
+                  `args[0] keys: ${msg.args?.[0] ? Object.keys(msg.args[0]).join(",") : "(no args[0])"}.`,
+              );
             }
           }
         }

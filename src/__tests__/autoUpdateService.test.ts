@@ -38,6 +38,7 @@ vi.mock("../steamClient", () => ({
   isSteamClientAvailable: vi.fn().mockReturnValue(true),
   registerForResume: vi.fn().mockReturnValue(null), // default: no SteamClient event, use heartbeat
   registerForAppLifetime: vi.fn().mockReturnValue(null),
+  probeSteamClientApi: vi.fn(),
 }));
 
 vi.mock("../providers", () => ({
@@ -107,6 +108,7 @@ async function getService(settingsOverrides: Record<string, any> = {}) {
         capturedGameCallback = null;
       };
     }),
+    probeSteamClientApi: vi.fn(),
   }));
 
   vi.doMock("../providers", () => ({

@@ -7,26 +7,63 @@ import { UpdateSource, SourceStatus, Trigger, UpdateCheckResult, NotificationLev
 
 const PREFIX = "[AutoUpdate]";
 
+// ── Backend log bridge ──────────────────────────────────────
+
+type BackendLogFn = (level: string, message: string) => void;
+let _backendLog: BackendLogFn | null = null;
+
+export function setBackendLog(fn: BackendLogFn | null) {
+  _backendLog = fn;
+}
+
+function logToBackend(level: string, ...args: unknown[]) {
+  if (!_backendLog) return;
+  try {
+    const message = args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" ");
+    _backendLog(level, message);
+  } catch {
+    /* never break the caller */
+  }
+}
+
 // ── Logging ──────────────────────────────────────────────────
 
-/** Always emits - for important lifecycle events, results, and errors. */
-export const log = (...args: unknown[]) => console.info(PREFIX, ...args);
-export const logWarn = (...args: unknown[]) => console.warn(PREFIX, ...args);
-export const logError = (...args: unknown[]) => console.error(PREFIX, ...args);
+export const log = (...args: unknown[]) => {
+  console.info(PREFIX, ...args);
+  logToBackend("info", ...args);
+};
+export const logWarn = (...args: unknown[]) => {
+  console.warn(PREFIX, ...args);
+  logToBackend("warn", ...args);
+};
+export const logError = (...args: unknown[]) => {
+  console.error(PREFIX, ...args);
+  logToBackend("error", ...args);
+};
 
-/**
- * Debug logging - only emits when debug mode is enabled.
- * Call setDebugEnabled() when settings load or change.
- */
 let _debugEnabled = false;
 
 export function setDebugEnabled(enabled: boolean) {
   _debugEnabled = enabled;
-  if (enabled) log("Debug logging enabled");
+  log("Debug logging:", enabled ? "ON" : "OFF");
 }
 
 export const debug = (...args: unknown[]) => {
-  if (_debugEnabled) console.info(PREFIX, "[DEBUG]", ...args);
+  if (_debugEnabled) {
+    console.info(PREFIX, "[DEBUG]", ...args);
+    logToBackend("debug", ...args);
+  }
+};
+
+/**
+ * Fine-grained trace logging — CEF console only, never goes through IPC.
+ * Use for high-frequency events (per-IPC-call diagnostics, per-event handlers)
+ * where backend logging would saturate the WS channel. View via chrome://inspect.
+ */
+export const trace = (...args: unknown[]) => {
+  if (_debugEnabled) {
+    console.info(PREFIX, "[TRACE]", ...args);
+  }
 };
 
 export function errorMessage(e: unknown): string {
@@ -66,7 +103,7 @@ export function sourceLabel(source: UpdateSource): string {
     case "steamos":
       return "🖥️ SteamOS";
     case "steam":
-      return "🎮 Steam";
+      return "🎮 Steam Apps";
   }
 }
 
@@ -74,9 +111,40 @@ function pluralUpdates(n: number): string {
   return `update${n === 1 ? "" : "s"}`;
 }
 
-function updateSummaryCore(pendingCount: number, forcedCount: number): string {
+/**
+ * Per-source verb for what we did with the update.
+ *
+ * Steam: we asked Steam to start the download — Steam handles the actual download
+ * asynchronously, so "started" is the truthful word. (Previously this said
+ * "applied" which sounded like the update was complete.)
+ *
+ * Flatpak / Decky: we ran the install — by the time forcedCount > 0 the bits
+ * have been written.
+ *
+ * SteamOS: we staged the update to the inactive partition — activation requires
+ * a reboot, so "staged" is what compactStatusText surfaces.
+ *
+ * Decky Loader: we triggered self-update; it then restarts itself.
+ */
+function actionVerb(source: UpdateSource): string {
+  switch (source) {
+    case "steam":
+      return "started";
+    case "steamos":
+      return "staged";
+    case "decky-loader":
+      return "updated";
+    case "flatpak":
+    case "decky":
+      return "applied";
+  }
+}
+
+function updateSummaryCore(source: UpdateSource, pendingCount: number, forcedCount: number): string {
   if (forcedCount > 0 && pendingCount > 0) {
-    return `${forcedCount} of ${pendingCount} ${pluralUpdates(pendingCount)} applied`;
+    const noun = source === "steam" ? "download" : "update";
+    const plural = `${noun}${pendingCount === 1 ? "" : "s"}`;
+    return `${forcedCount} of ${pendingCount} ${plural} ${actionVerb(source)}`;
   }
   if (pendingCount > 0) {
     return `${pendingCount} ${pluralUpdates(pendingCount)} available`;
@@ -90,7 +158,7 @@ export function formatUpdateSummary(result: {
   forcedCount: number;
 }): string {
   const label = sourceLabel(result.source);
-  const summary = updateSummaryCore(result.pendingCount, result.forcedCount);
+  const summary = updateSummaryCore(result.source, result.pendingCount, result.forcedCount);
   return result.pendingCount === 0 && result.forcedCount === 0
     ? `${label}: checked, no updates`
     : `${label}: ${summary}`;
@@ -158,7 +226,7 @@ function sourceStatusLabel(status: SourceStatus, applyingText: string, defaultTe
 }
 
 export function steamStatusLabel(status: SourceStatus): string {
-  return sourceStatusLabel(status, "Starting updates...", "Check Steam");
+  return sourceStatusLabel(status, "Starting updates...", "Check Steam Apps");
 }
 
 export function flatpakStatusLabel(status: SourceStatus): string {
@@ -177,6 +245,29 @@ export function steamosStatusLabel(status: SourceStatus): string {
   return sourceStatusLabel(status, "Downloading SteamOS update...", "Check SteamOS");
 }
 
+// ── Network ─────────────────────────────────────────────────
+
+export function isOnline(): boolean {
+  return typeof navigator !== "undefined" ? navigator.onLine : true;
+}
+
+export function waitForNetwork(timeoutMs = 30_000): Promise<boolean> {
+  if (isOnline()) return Promise.resolve(true);
+
+  return new Promise((resolve) => {
+    const start = Date.now();
+    const interval = setInterval(() => {
+      if (isOnline()) {
+        clearInterval(interval);
+        resolve(true);
+      } else if (Date.now() - start >= timeoutMs) {
+        clearInterval(interval);
+        resolve(false);
+      }
+    }, 2000);
+  });
+}
+
 export function compactStatusText(source: UpdateSource, lastCheck: UpdateCheckResult | null): string {
   if (!lastCheck) return "Never checked";
   if (lastCheck.errors.length > 0) {
@@ -185,5 +276,5 @@ export function compactStatusText(source: UpdateSource, lastCheck: UpdateCheckRe
   }
   // SteamOS "staged" is a special post-apply state
   if (source === "steamos" && lastCheck.forcedCount > 0) return "Staged \u2014 reboot when ready";
-  return updateSummaryCore(lastCheck.pendingCount, lastCheck.forcedCount);
+  return updateSummaryCore(source, lastCheck.pendingCount, lastCheck.forcedCount);
 }

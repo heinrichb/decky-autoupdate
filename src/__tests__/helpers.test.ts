@@ -100,7 +100,7 @@ describe("triggerLabel", () => {
 
 describe("sourceLabel", () => {
   it("returns steam label", () => {
-    expect(sourceLabel("steam")).toBe("🎮 Steam");
+    expect(sourceLabel("steam")).toBe("🎮 Steam Apps");
   });
 
   it("returns flatpak label", () => {
@@ -185,12 +185,12 @@ describe("combinedToastBody", () => {
     const body = combinedToastBody([noUpdates, withUpdates], "updates-only");
     expect(body).not.toBeNull();
     expect(body).toContain("Flatpak");
-    expect(body).not.toContain("Steam");
+    expect(body).not.toContain("Steam Apps");
   });
 
   it("includes all sources when level is all", () => {
     const body = combinedToastBody([noUpdates, withUpdates], "all");
-    expect(body).toContain("Steam");
+    expect(body).toContain("Steam Apps");
     expect(body).toContain("Flatpak");
   });
 
@@ -270,6 +270,21 @@ describe("formatUpdateSummary", () => {
     const text = formatUpdateSummary({ source: "decky", pendingCount: 2, forcedCount: 2 });
     expect(text).toContain("2 of 2");
     expect(text).toContain("applied");
+  });
+
+  it("uses 'started' verb for steam, not 'applied', because Steam downloads asynchronously", () => {
+    const text = formatUpdateSummary({ source: "steam", pendingCount: 5, forcedCount: 3 });
+    expect(text).toContain("3 of 5");
+    expect(text).toContain("started");
+    expect(text).not.toContain("applied");
+    // Steam uses "download" noun instead of "update" since we're triggering downloads, not installs.
+    expect(text).toContain("download");
+  });
+
+  it("uses 'staged' verb for steamos because the update needs a reboot to activate", () => {
+    const text = formatUpdateSummary({ source: "steamos", pendingCount: 1, forcedCount: 1 });
+    expect(text).toContain("staged");
+    expect(text).not.toContain("applied");
   });
 
   it("uses singular 'update' for count of 1", () => {

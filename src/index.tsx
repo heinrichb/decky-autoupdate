@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useRef, ReactNode } from "react";
 import { MdUpdate } from "react-icons/md";
 import { SourceStatus } from "./types";
 import { service, ServiceState } from "./autoUpdateService";
+import { PLUGIN_VERSION } from "./version";
 import { getInstalledPlugins, InstalledPlugin } from "./deckyApi";
 import type { NotificationLevel, UpdateSource, UpdateCheckResult } from "./types";
 import {
@@ -173,7 +174,7 @@ function AutoUpdatePanel() {
           <>
             <PanelSectionRow>
               <ButtonItem
-                label="Steam"
+                label="Steam Apps"
                 description={statusDesc(
                   "steam",
                   state.steamLastCheck,
@@ -565,6 +566,29 @@ function AutoUpdatePanel() {
             checked={settings.debugLogging}
             onChange={(val) => update({ debugLogging: val })}
           />
+        </PanelSectionRow>
+
+        <PanelSectionRow>
+          <ButtonItem
+            layout="below"
+            onClick={async () => {
+              const dump = await service.dumpDiagnostics();
+              try {
+                await navigator.clipboard.writeText(dump);
+                toaster.toast({ title: "AutoUpdate", body: "Diagnostics copied to clipboard" });
+              } catch {
+                toaster.toast({ title: "AutoUpdate", body: "Diagnostics written to log" });
+              }
+            }}
+          >
+            Dump diagnostics
+          </ButtonItem>
+        </PanelSectionRow>
+
+        <PanelSectionRow>
+          <div style={{ fontSize: "0.75em", opacity: 0.4, textAlign: "center", padding: "4px 0" }}>
+            AutoUpdate v{PLUGIN_VERSION}
+          </div>
         </PanelSectionRow>
       </PanelSection>
 

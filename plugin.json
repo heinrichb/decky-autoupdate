@@ -1,5 +1,6 @@
 {
   "name": "AutoUpdate",
+  "version": "0.1.0",
   "author": "Brennen Heinrich",
   "flags": ["root"],
   "api_version": 2,

@@ -70,11 +70,23 @@ export async function checkAndApplyFlatpak(autoApply: boolean): Promise<UpdateCh
   try {
     debug("checkAndApplyFlatpak: autoApply =", autoApply);
     const t0 = Date.now();
-    const r = await callPluginMethod<FlatpakCheckAndApplyResult>("check_and_apply_flatpak", [autoApply], 660_000);
+    const raw = await callPluginMethod<FlatpakCheckAndApplyResult>("check_and_apply_flatpak", [autoApply], 660_000);
     debug(
-      `checkAndApplyFlatpak: response in ${Date.now() - t0}ms - success=${r.success}, ` +
-        `updates=${r.updates?.length ?? 0}, applied=${r.applied}`,
+      `checkAndApplyFlatpak: response in ${Date.now() - t0}ms -`,
+      JSON.stringify({
+        success: raw?.success,
+        updatesLength: raw?.updates?.length,
+        applied: raw?.applied,
+        error: raw?.error,
+        applyError: raw?.applyError,
+      }),
     );
+
+    const r = raw ?? ({} as FlatpakCheckAndApplyResult);
+    if (typeof r.success !== "boolean" || !Array.isArray(r.updates)) {
+      logWarn("checkAndApplyFlatpak: unexpected response shape:", r ? Object.keys(r).join(", ") : "null");
+      return emptyResult("flatpak", ["Unexpected response from flatpak backend"]);
+    }
 
     const errors: string[] = [];
     if (r.applyError) {

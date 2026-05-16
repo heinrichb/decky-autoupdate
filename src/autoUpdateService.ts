@@ -21,7 +21,7 @@ import {
   DEFAULT_SETTINGS,
   emptyResult,
 } from "./types";
-import { waitForSteamClient, registerForResume, registerForAppLifetime } from "./steamClient";
+import { waitForSteamClient, registerForResume, registerForAppLifetime, probeSteamClientApi } from "./steamClient";
 import {
   checkSteam,
   checkAndApplyFlatpak,
@@ -32,8 +32,19 @@ import {
   isSteamosAvailable,
   checkAndApplySteamos,
 } from "./providers";
-import { callPluginMethod } from "./deckyApi";
-import { combinedToastBody, log, logError, debug, errorMessage, setDebugEnabled } from "./helpers";
+import { callPluginMethod, getDeckyVersion } from "./deckyApi";
+import { PLUGIN_VERSION } from "./version";
+import {
+  combinedToastBody,
+  log,
+  logWarn,
+  logError,
+  debug,
+  errorMessage,
+  setDebugEnabled,
+  setBackendLog,
+  waitForNetwork,
+} from "./helpers";
 
 const IPC_TIMEOUT = 10_000;
 const getSettings = () => callPluginMethod<Settings>("get_settings", IPC_TIMEOUT);
@@ -134,13 +145,16 @@ class AutoUpdateService {
   async start() {
     if (this.started) return;
     this.started = true;
-    log("Service starting");
+    log(`AutoUpdate v${PLUGIN_VERSION} starting`);
 
     try {
       debug("Loading settings via IPC...");
       const s = await getSettings();
       this.state.settings = { ...DEFAULT_SETTINGS, ...s };
       setDebugEnabled(this.state.settings.debugLogging);
+      setBackendLog((level: string, message: string) => {
+        callPluginMethod("log_frontend_message", [level, message], 5_000).catch(() => {});
+      });
       this.state.settingsLoaded = true;
       debug("Settings loaded:", JSON.stringify(this.state.settings));
     } catch (e) {
@@ -180,6 +194,9 @@ class AutoUpdateService {
     ]);
     this.state.steamReady = steamAvailable;
     log("SteamClient ready:", steamAvailable);
+    if (steamAvailable) {
+      probeSteamClientApi();
+    }
     this.notify();
 
     try {
@@ -194,9 +211,19 @@ class AutoUpdateService {
     this.registerGameDetection();
     this.rebuildPeriodicTimers();
 
+    let deckyVersion = "";
+    if (this.state.deckyAvailable) {
+      try {
+        deckyVersion = await getDeckyVersion();
+      } catch (e) {
+        log("Failed to fetch Decky Loader version:", errorMessage(e));
+      }
+    }
+
     log(
-      "Service started.",
-      "checkOnWake:",
+      `Service started. v${PLUGIN_VERSION}`,
+      deckyVersion ? `| Decky Loader: ${deckyVersion}` : "",
+      "| checkOnWake:",
       this.state.settings.checkOnWake,
       "| flatpak:",
       this.state.flatpakAvailable,
@@ -215,8 +242,55 @@ class AutoUpdateService {
     }, 10_000);
   }
 
+  async dumpDiagnostics(): Promise<string> {
+    const lines: string[] = [];
+    lines.push(`=== AutoUpdate Diagnostics ===`);
+    lines.push(`Plugin version: ${PLUGIN_VERSION}`);
+    lines.push(`Debug logging: ${this.state.settings.debugLogging ? "ON" : "OFF"}`);
+    lines.push(`Settings loaded: ${this.state.settingsLoaded}`);
+    lines.push(`Steam ready: ${this.state.steamReady}`);
+    lines.push(`Flatpak available: ${this.state.flatpakAvailable}`);
+    lines.push(`Decky available: ${this.state.deckyAvailable}`);
+    lines.push(`SteamOS available: ${this.state.steamosAvailable}`);
+
+    if (this.state.deckyAvailable) {
+      try {
+        const deckyVer = await getDeckyVersion();
+        lines.push(`Decky Loader version: ${deckyVer}`);
+      } catch {
+        lines.push(`Decky Loader version: (unavailable)`);
+      }
+    }
+
+    lines.push(`--- Settings ---`);
+    lines.push(JSON.stringify(this.state.settings, null, 2));
+
+    lines.push(`--- Last Check Results ---`);
+    const sources: UpdateSource[] = ["steam", "flatpak", "decky", "decky-loader", "steamos"];
+    for (const source of sources) {
+      const { lastCheck } = SOURCE_FIELDS[source];
+      const result = this.state[lastCheck];
+      if (result) {
+        lines.push(
+          `${source}: pending=${result.pendingCount} forced=${result.forcedCount} errors=${result.errors.length} at ${new Date(result.timestamp).toISOString()}`,
+        );
+      } else {
+        lines.push(`${source}: never checked`);
+      }
+    }
+
+    lines.push(`History entries: ${this.state.historyEntries.length}`);
+    lines.push(`Running games: ${this.runningGames.size}`);
+    lines.push(`=== End Diagnostics ===`);
+
+    const dump = lines.join("\n");
+    log(dump);
+    return dump;
+  }
+
   stop() {
     log("Service stopping");
+    setBackendLog(null);
     this.started = false;
     if (this.resumeUnregister) {
       this.resumeUnregister();
@@ -311,9 +385,9 @@ class AutoUpdateService {
 
     if (unregister) {
       this.resumeUnregister = unregister;
-      debug("Wake detection: registered SteamClient.System.RegisterForOnResumeFromSuspend");
+      log("Wake detection: registered SteamClient.System.RegisterForOnResumeFromSuspend");
     } else {
-      debug("Wake detection: SteamClient API unavailable, falling back to heartbeat");
+      log("Wake detection: SteamClient API unavailable, falling back to heartbeat");
       this.startHeartbeat();
     }
   }
@@ -348,9 +422,16 @@ class AutoUpdateService {
       return;
     }
 
-    // Let Steam's download manager re-initialize after waking from sleep
     debug("Wake: waiting 8s for Steam to settle...");
     await new Promise((r) => setTimeout(r, 8000));
+
+    debug("Wake: waiting for network...");
+    const online = await waitForNetwork(30_000);
+    if (!online) {
+      logWarn("Wake: network not available after 30s, skipping checks");
+      return;
+    }
+    debug("Wake: network available, starting checks");
 
     await this.runAllEnabledChecks("wake");
 
@@ -386,9 +467,9 @@ class AutoUpdateService {
 
     if (unregister) {
       this.gameUnregister = unregister;
-      debug("Game detection: registered AppLifetimeNotifications");
+      log("Game detection: registered AppLifetimeNotifications");
     } else {
-      debug("Game detection: GameSessions API not available");
+      log("Game detection: GameSessions API not available");
     }
   }
 

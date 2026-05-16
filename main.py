@@ -35,7 +35,13 @@ class Plugin:
         self.settings = self._validate_settings(self._load_json(
             self.settings_path, self._default_settings()
         ))
-        decky.logger.info("AutoUpdate loaded")
+        pkg_path = os.path.join(decky.DECKY_PLUGIN_DIR, "package.json")
+        self._version = self._load_json(pkg_path, {}).get("version", "unknown")
+        decky.logger.info(
+            f"AutoUpdate v{self._version} loaded | "
+            f"debug={'ON' if self.settings.get('debugLogging') else 'OFF'} | "
+            f"settings={self.settings_path}"
+        )
 
     async def _unload(self):
         decky.logger.info("AutoUpdate unloaded")
@@ -128,6 +134,36 @@ class Plugin:
     async def ping(self) -> bool:
         """Fast IPC health check. Returns immediately."""
         self._debug("ping received")
+        return True
+
+    async def get_decky_version(self) -> str:
+        """Read the Decky Loader version from disk.
+
+        The updater/get_version route returns an error on current Decky builds,
+        so we read /home/deck/homebrew/services/.loader.version directly.
+        """
+        try:
+            with open("/home/deck/homebrew/services/.loader.version", "r") as f:
+                return f.read().strip()
+        except Exception as e:
+            decky.logger.warning(f"Failed to read .loader.version: {e}")
+            return ""
+
+    async def log_frontend_message(self, level: str, message: str) -> bool:
+        """Write a frontend log message to the plugin log file."""
+        if not isinstance(message, str):
+            return False
+        if len(message) > 2000:
+            message = message[:2000] + "...(truncated)"
+        tag = "[Frontend]"
+        if level == "error":
+            decky.logger.error(f"{tag} {message}")
+        elif level == "warn":
+            decky.logger.warning(f"{tag} {message}")
+        elif level == "debug":
+            self._debug(f"{tag} {message}")
+        else:
+            decky.logger.info(f"{tag} {message}")
         return True
 
     # --- Subprocess helpers ---
