@@ -11,6 +11,15 @@
 
 import { PendingUpdate, UpdateCheckResult, DownloadItem } from "./types";
 import { log, logWarn, logError, debug, errorMessage } from "./helpers";
+import { callPluginMethod } from "./deckyApi";
+
+interface ForceUpdateResult {
+  success: boolean;
+  manifest_path: string;
+  manifest_modified: boolean;
+  url_invoked: boolean;
+  error: string;
+}
 
 // ── Global declarations ──────────────────────────────────────
 
@@ -51,19 +60,33 @@ interface SteamClientGameSessions {
   [key: string]: unknown;
 }
 
+/**
+ * All SteamClient.Downloads methods take a `remoteClientId: string` second
+ * argument identifying which Steam client owns the download (local Steam vs
+ * a remote-play paired client). Calls made with the second arg omitted are
+ * silent no-ops on current Steam builds — this was the root cause of the
+ * "force-start does nothing" symptom that confused us for ages.
+ *
+ * For local Steam (no remote-play active) pass `LOCAL_CLIENT_ID` = `"0"`.
+ */
 interface SteamClientDownloads {
   RegisterForDownloadItems(callback: (isDownloading: boolean, items: DownloadItem[]) => void): Unregisterable;
   RegisterForDownloadOverview(callback: (overview: unknown) => void): Unregisterable;
-  ResumeAppUpdate(appId: number): void;
-  PauseAppUpdate?(appId: number): void;
-  QueueAppUpdate?(appId: number): void;
-  MoveAppUpdateUp?(appId: number): void;
-  SetQueueIndex?(appId: number, index: number): void;
-  RemoveFromDownloadList?(appId: number): void;
-  EnableAllDownloads(): void;
-  SuspendDownloadThrottling?(suspend?: boolean): void;
+  ResumeAppUpdate(appId: number, remoteClientId: string): void;
+  PauseAppUpdate?(appId: number, remoteClientId: string): void;
+  QueueAppUpdate?(appId: number, remoteClientId: string): void;
+  MoveAppUpdateUp?(appId: number, remoteClientId: string): void;
+  MoveAppUpdateDown?(appId: number, remoteClientId: string): void;
+  SetQueueIndex?(appId: number, index: number, remoteClientId: string): void;
+  RemoveFromDownloadList?(appId: number, remoteClientId: string): void;
+  EnableAllDownloads(enable: boolean, remoteClientId: string): void;
+  SuspendDownloadThrottling?(suspend: boolean, remoteClientId: string): void;
+  SuspendLanPeerContent?(suspend: boolean, remoteClientId: string): void;
   [key: string]: unknown;
 }
+
+/** Local-Steam-self client ID used by all Downloads.* methods. Found in Steam UI bundle as `n.O = "0"`. */
+const LOCAL_CLIENT_ID = "0";
 
 interface SteamClientUser {
   RegisterForResumeSuspendedGamesProgress?(callback: () => void): Unregisterable;
@@ -290,6 +313,38 @@ export function probeSteamClientApi(): void {
   if (seen.length > 0) {
     log("SteamClient methods matching start/defer/schedule:", seen.join(", "));
   }
+
+  // Steam UI uses MobX stores accessible from the global window. The
+  // Library "Update Now" button's handler lives in one of these. Probe for
+  // any download-related store globals and their methods.
+  try {
+    const w = window as unknown as Record<string, unknown>;
+    const downloadGlobals = Object.keys(w).filter((k) =>
+      /download|update|library|app(s|details|info)?store|queue/i.test(k),
+    );
+    if (downloadGlobals.length > 0) {
+      log("Global download/update-related window keys:", downloadGlobals.join(", "));
+    }
+
+    // For each promising global that's an object, list its callable members.
+    for (const name of downloadGlobals) {
+      const v = w[name];
+      if (v && typeof v === "object") {
+        const methods = Object.keys(v as Record<string, unknown>).filter(
+          (k) => typeof (v as Record<string, unknown>)[k] === "function",
+        );
+        // Limit to methods that sound related to update/queue/download/start
+        const filtered = methods.filter((m) =>
+          /update|queue|download|start|schedule|defer|resume/i.test(m),
+        );
+        if (filtered.length > 0) {
+          log(`window.${name} matching methods:`, filtered.slice(0, 30).join(", "));
+        }
+      }
+    }
+  } catch (e) {
+    debug("Global probe failed:", errorMessage(e));
+  }
 }
 
 /**
@@ -394,39 +449,103 @@ export function getPendingUpdates(): Promise<PendingUpdate[]> {
               "has_update:",
               sample.update_type_info?.[0]?.has_update ?? "N/A",
             );
-            // Full raw dump of the first scheduled-looking item — shows
-            // deferred_time, paused, active, queue_index, update flags etc.
-            // This is what we need to understand what's pinning items in
-            // "scheduled" state across all the force-start API calls.
-            const firstScheduled = items.find(
-              (it) => !it.completed && (it.deferred_time ?? 0) > 0 && it.update_type_info?.[0]?.has_update,
-            );
-            if (firstScheduled) {
-              log(
-                "getPendingUpdates: raw scheduled DownloadItem dump (first match):",
-                JSON.stringify(firstScheduled),
+            // Compact dump of ALL items so we can compare what we see against
+            // Steam's UI queue. Format per item:
+            //   appid|name|active|paused|completed|deferred_time|queue_index|
+            //     has_update[0..2]|maxBytes|update_result|build->target
+            const compact = items.map((it) => {
+              const progress = it.update_type_info?.[0]?.progress ?? [];
+              const maxBytes = progress.reduce(
+                (m, p) => Math.max(m, p?.bytes_total ?? 0),
+                0,
               );
-            }
+              const hasUpdateFlags = (it.update_type_info ?? [])
+                .map((u) => (u?.has_update ? "1" : "0"))
+                .join("");
+              return (
+                `${it.appid}|${getAppName(it.appid)}|` +
+                `a=${it.active ? 1 : 0}|p=${it.paused ? 1 : 0}|c=${it.completed ? 1 : 0}|` +
+                `def=${it.deferred_time ?? 0}|qi=${it.queue_index ?? -99}|` +
+                `hu=${hasUpdateFlags}|maxB=${maxBytes}|` +
+                `rc=${it.update_result ?? "?"}|b=${it.buildid}->${it.target_buildid}`
+              );
+            });
+            log("getPendingUpdates: ALL items compact dump:\n  " + compact.join("\n  "));
           } catch (e) {
             logWarn("getPendingUpdates: failed to log sample item:", errorMessage(e));
           }
         }
 
-        const pending: PendingUpdate[] = items
-          .filter((item) => !item.completed && item.update_type_info?.[0]?.has_update)
-          .map((item) => {
-            const bytes = getDownloadBytes(item);
-            return {
-              appId: item.appid,
-              name: getAppName(item.appid),
-              bytesToDownload: bytes.total,
-              bytesDownloaded: bytes.downloaded,
-              state: determineState(item),
-            };
-          });
+        // Initial coarse filter: needs an update flag and isn't completed.
+        const candidates = items.filter(
+          (item) => !item.completed && item.update_type_info?.[0]?.has_update,
+        );
 
-        debug("getPendingUpdates: filtered to", pending.length, "pending updates");
-        resolve(pending);
+        // Steam's queue UI only shows items where StateFlags & 6 == 6
+        // (FullyInstalled + UpdateRequired). The DownloadItem API doesn't
+        // expose StateFlags, so ask the backend to read each app's manifest.
+        // This is what gets our count to match Steam's UI exactly.
+        const appIds = candidates.map((c) => c.appid);
+        const STATE_FLAGS_FULLY_INSTALLED = 4;
+        const STATE_FLAGS_UPDATE_REQUIRED = 2;
+        const STATE_FLAGS_QUEUE_MASK = STATE_FLAGS_FULLY_INSTALLED | STATE_FLAGS_UPDATE_REQUIRED; // 6
+
+        callPluginMethod<Record<string, number>>("get_app_state_flags_batch", [appIds], 8_000)
+          .then((flagsByAppId) => {
+            const filtered = candidates.filter((item) => {
+              const flags = flagsByAppId[String(item.appid)];
+              if (flags == null || flags < 0) {
+                // Backend couldn't read the manifest (uninstalled/owned app).
+                // Steam doesn't queue these — exclude.
+                debug(
+                  `getPendingUpdates: excluding ${item.appid} (${getAppName(item.appid)}) — no manifest`,
+                );
+                return false;
+              }
+              if ((flags & STATE_FLAGS_QUEUE_MASK) !== STATE_FLAGS_QUEUE_MASK) {
+                debug(
+                  `getPendingUpdates: excluding ${item.appid} (${getAppName(item.appid)}) — ` +
+                    `StateFlags=${flags} doesn't match queue mask (6)`,
+                );
+                return false;
+              }
+              return true;
+            });
+
+            const pending: PendingUpdate[] = filtered.map((item) => {
+              const bytes = getDownloadBytes(item);
+              return {
+                appId: item.appid,
+                name: getAppName(item.appid),
+                bytesToDownload: bytes.total,
+                bytesDownloaded: bytes.downloaded,
+                state: determineState(item),
+              };
+            });
+            log(
+              `getPendingUpdates: ${candidates.length} candidates -> ${pending.length} after StateFlags filter`,
+            );
+            resolve(pending);
+          })
+          .catch((e) => {
+            // If the backend lookup fails, fall back to the looser filter so
+            // we degrade gracefully rather than reporting zero updates.
+            logWarn(
+              "getPendingUpdates: StateFlags lookup failed, falling back to loose filter:",
+              errorMessage(e),
+            );
+            const pending: PendingUpdate[] = candidates.map((item) => {
+              const bytes = getDownloadBytes(item);
+              return {
+                appId: item.appid,
+                name: getAppName(item.appid),
+                bytesToDownload: bytes.total,
+                bytesDownloaded: bytes.downloaded,
+                state: determineState(item),
+              };
+            });
+            resolve(pending);
+          });
       });
     } catch (e) {
       clearTimeout(timeout);
@@ -458,50 +577,38 @@ export async function forceStartUpdate(appId: number): Promise<boolean> {
   // cleared deferred_time on current Steam builds.
   //
   // The strategy here mirrors what the Steam Library UI does when you click
-  // "Update Now" on a scheduled item:
-  //   1. SetAppAutoUpdateBehavior(appId, 0) — "Always keep this game up to
-  //      date." Overrides the per-app schedule policy so Steam stops deferring.
-  //   2. PauseAppUpdate(appId) — flips the item from "scheduled" into "paused",
-  //      which is a state ResumeAppUpdate can actually act on.
-  //   3. ResumeAppUpdate(appId) — starts the download from the paused state.
+  // ALL SteamClient.Downloads.* methods take a remoteClientId as their last
+  // argument. We pass LOCAL_CLIENT_ID = "0" (verified in Steam's UI bundle).
+  // Before adding the second arg these calls silently no-op'd — that was the
+  // root cause of force-start doing nothing on current Steam builds.
+  //
+  // Sequence mirrors what Steam Library's "Update Now" button does:
+  //   1. SetAppAutoUpdateBehavior(appId, 0) — "Always keep up to date"
+  //   2. QueueAppUpdate(appId, LOCAL) — re-enqueue (clears scheduled state)
+  //   3. ResumeAppUpdate(appId, LOCAL) — start the download
   if (typeof apps.SetAppAutoUpdateBehavior === "function") {
     try {
       apps.SetAppAutoUpdateBehavior(appId, 0);
-      debug(`SetAppAutoUpdateBehavior(${appId}, 0) called (always update)`);
+      debug(`SetAppAutoUpdateBehavior(${appId}, 0)`);
       calledSomething = true;
     } catch (e) {
       debug(`SetAppAutoUpdateBehavior(${appId}, 0) failed: ${errorMessage(e)}`);
     }
   }
 
-  // Steam's behavior enum values are not documented externally. Best guesses:
-  //   0 = use global default (which probably IS what defers)
-  //   1 = always allow background downloads
-  //   2 = pause during gameplay
-  // We try 1 here ("always allow") to override any global throttle.
-  if (typeof apps.SetAppBackgroundDownloadsBehavior === "function") {
+  if (typeof downloads.QueueAppUpdate === "function") {
     try {
-      apps.SetAppBackgroundDownloadsBehavior(appId, 1);
-      debug(`SetAppBackgroundDownloadsBehavior(${appId}, 1) called (always allow)`);
+      downloads.QueueAppUpdate(appId, LOCAL_CLIENT_ID);
+      debug(`QueueAppUpdate(${appId}, "${LOCAL_CLIENT_ID}")`);
       calledSomething = true;
     } catch (e) {
-      debug(`SetAppBackgroundDownloadsBehavior(${appId}, 1) failed: ${errorMessage(e)}`);
-    }
-  }
-
-  if (typeof downloads.PauseAppUpdate === "function") {
-    try {
-      downloads.PauseAppUpdate(appId);
-      debug(`PauseAppUpdate(${appId}) called`);
-      calledSomething = true;
-    } catch (e) {
-      debug(`PauseAppUpdate(${appId}) failed: ${errorMessage(e)}`);
+      debug(`QueueAppUpdate(${appId}, "${LOCAL_CLIENT_ID}") failed: ${errorMessage(e)}`);
     }
   }
 
   try {
-    downloads.ResumeAppUpdate(appId);
-    debug(`ResumeAppUpdate(${appId}) called`);
+    downloads.ResumeAppUpdate(appId, LOCAL_CLIENT_ID);
+    debug(`ResumeAppUpdate(${appId}, "${LOCAL_CLIENT_ID}")`);
     calledSomething = true;
   } catch (e) {
     logError(`Failed to resume update for ${appId}:`, e);
@@ -535,18 +642,18 @@ export async function forceStartAllUpdates(): Promise<UpdateCheckResult> {
     //   - SuspendDownloadThrottling(true): off-peak/scheduled-hours throttle
     //   - MoveAppUpdateUp(appId): force to top of queue (per-app, later)
     try {
-      SteamClient!.Downloads.EnableAllDownloads();
-      debug("EnableAllDownloads() called");
+      SteamClient!.Downloads.EnableAllDownloads(true, LOCAL_CLIENT_ID);
+      debug(`EnableAllDownloads(true, "${LOCAL_CLIENT_ID}")`);
     } catch (e) {
       logError("EnableAllDownloads failed:", e);
     }
-    // SuspendDownloadThrottling(true) tells Steam to suspend its throttling/
-    // scheduling logic — i.e. ignore the configured "download during off-peak
-    // hours" or "pause during gameplay" rules so the queue can run NOW.
+    // SuspendDownloadThrottling(true, clientId) tells Steam to suspend its
+    // throttling/scheduling logic — i.e. ignore "off-peak hours" or "pause
+    // during gameplay" rules so the queue can run NOW.
     if (typeof SteamClient!.Downloads.SuspendDownloadThrottling === "function") {
       try {
-        SteamClient!.Downloads.SuspendDownloadThrottling(true);
-        debug("SuspendDownloadThrottling(true) called");
+        SteamClient!.Downloads.SuspendDownloadThrottling(true, LOCAL_CLIENT_ID);
+        debug(`SuspendDownloadThrottling(true, "${LOCAL_CLIENT_ID}")`);
       } catch (e) {
         logError("SuspendDownloadThrottling failed:", e);
       }
@@ -611,6 +718,41 @@ export async function forceStartAllUpdates(): Promise<UpdateCheckResult> {
         );
       } else {
         log("All previously-stuck updates transitioned out of scheduled state on retry");
+      }
+    }
+
+    // Last-resort pass: items that survived CEF API retries are blocked by
+    // the appmanifest_<appid>.acf `ScheduledAutoUpdate` field. Have the
+    // backend (running as root) clear that field directly and hand the appid
+    // to the running Steam client via `steam steam://updateapp/<id>`.
+    if (stillScheduled.length > 0) {
+      logWarn(
+        `${stillScheduled.length} update(s) still stuck after SteamClient API retries — falling back to backend manifest edit + steam URL`,
+      );
+      for (const update of stillScheduled) {
+        try {
+          const res = await callPluginMethod<ForceUpdateResult>(
+            "force_steam_app_update",
+            [update.appId],
+            15_000,
+          );
+          log(
+            `force_steam_app_update(${update.appId}): success=${res.success}, manifest_modified=${res.manifest_modified}, url_invoked=${res.url_invoked}${res.error ? ", error=" + res.error : ""}`,
+          );
+        } catch (e) {
+          logError(`force_steam_app_update(${update.appId}) IPC failed:`, errorMessage(e));
+        }
+      }
+      // Steam needs a moment to re-read manifests + process the URL
+      await new Promise((r) => setTimeout(r, 6000));
+      recheck = await getPendingUpdates();
+      stillScheduled = recheck.filter((u) => u.state === "scheduled");
+      if (stillScheduled.length === 0) {
+        log("Backend manifest edit + steam URL cleared all remaining scheduled items");
+      } else {
+        logWarn(
+          `${stillScheduled.length} of ${scheduledBefore} update(s) STILL scheduled after backend manifest edit: ${stillScheduled.map((u) => u.name).join(", ")}`,
+        );
       }
     }
 

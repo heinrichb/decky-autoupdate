@@ -428,7 +428,7 @@ describe("forceStartUpdate", () => {
     expect(result).toBe(false);
   });
 
-  it("calls ResumeAppUpdate and returns true", async () => {
+  it("calls ResumeAppUpdate with appId and LOCAL_CLIENT_ID and returns true", async () => {
     const resumeMock = vi.fn();
     (globalThis as any).SteamClient = {
       Apps: {},
@@ -439,7 +439,9 @@ describe("forceStartUpdate", () => {
 
     const result = await forceStartUpdate(12345);
     expect(result).toBe(true);
-    expect(resumeMock).toHaveBeenCalledWith(12345);
+    // SteamClient.Downloads.* methods take (appId, remoteClientId). "0" identifies
+    // the local Steam client; calls without it silently no-op on current builds.
+    expect(resumeMock).toHaveBeenCalledWith(12345, "0");
   });
 
   it("returns false when ResumeAppUpdate throws", async () => {

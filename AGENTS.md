@@ -66,6 +66,44 @@ This file is a living document. Keep it up to date throughout development.
 - `debug` (`helpers.ts`): gated by `debugLogging` setting, IPC'd to backend when enabled. Use for one-shot lifecycle diagnostics.
 - `trace` (`helpers.ts`): gated by `debugLogging`, CEF-console-only — **never** crosses IPC. Use for high-frequency events (per-IPC-call tracing, per-event-callback). Sending these through IPC caused a 5x cascade (each log was itself an IPC call generating 4 more logs) that saturated the WS channel and made legitimate calls hang for minutes. `callDeckyMethod` internal lifecycle logs are `trace`, not `debug`, for this reason.
 
+## Steam pending-updates filter: match the user's Library UI exactly
+SteamClient's `RegisterForDownloadItems` is over-permissive — it returns every
+owned app with `update_type_info[0].has_update === true`, including:
+
+- Owned games that aren't installed locally (no `appmanifest_*.acf`)
+- System runtimes (e.g. Steam Linux Runtime 2.0) where Steam keeps the
+  has_update flag set even when `buildid == TargetBuildID`
+- Stale entries with `BytesToDownload == 0`
+
+Steam's user-facing queue UI filters by manifest `StateFlags & 6 == 6`
+(`FullyInstalled` bit + `UpdateRequired` bit). The plugin mirrors this:
+
+1. `getPendingUpdates()` in `steamClient.ts` calls backend
+   `get_app_state_flags_batch(appIds)` which reads each app's manifest from
+   the library folders listed in `libraryfolders.vdf`.
+2. Items with no local manifest (`flags == -1`) or `StateFlags & 6 != 6`
+   are excluded with a debug log line citing the reason.
+3. If the backend lookup fails, the plugin degrades to the loose filter so
+   nothing breaks — pending count just won't match Steam's UI exactly.
+
+This is the contract that keeps phantom items from messing with force-start
+counts, toasts, and history. Any new "Steam reports has_update but item
+isn't actually queued" scenario should hit this filter automatically.
+
+If you see a pending count that doesn't match the Steam Library UI, dump
+`SteamClient.Downloads.RegisterForDownloadItems`'s output and look for items
+where `(StateFlags & 6) != 6` — that's almost always the culprit.
+
+## Cleaning up half-installed cruft
+Stale partial downloads accumulate in `steamapps/downloading/` (across all
+Steam libraries in `libraryfolders.vdf`) as `.delta` files and per-appid
+subdirs. Steam doesn't garbage-collect these on its own. Safe to remove
+the contents at any time — Steam will re-download what it needs.
+
+Orphan Wine prefixes for uninstalled games live at
+`steamapps/compatdata/<appid>/`. These may contain save files; only remove
+if Steam Cloud has the saves OR the user explicitly says.
+
 ## Known Steam API regression: `deferred_time` cannot be cleared from CEF
 Post Steam-update (May 2026 builds), apps with `deferred_time > 0` (scheduled for off-peak) **cannot be transitioned out of "scheduled" state** through any SteamClient API we can reach from the CEF context. The following all succeed (no exception, no error) but leave `deferred_time` and `queue_index` unchanged:
 

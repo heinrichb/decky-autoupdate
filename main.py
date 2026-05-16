@@ -131,6 +131,181 @@ class Plugin:
     async def clear_history(self) -> bool:
         return self._write_json(self.history_path, {"entries": []})
 
+    # --- Steam force-update via manifest + URL handler ---
+
+    # Cache of Steam library steamapps directories, read from libraryfolders.vdf
+    _steam_library_dirs: list[str] | None = None
+
+    @classmethod
+    def _steam_library_steamapps_dirs(cls) -> list[str]:
+        """Read libraryfolders.vdf to find every steamapps/ dir Steam knows about.
+
+        Returns paths to the steamapps/ directories themselves (containing
+        appmanifest_*.acf). Cached for the lifetime of the plugin.
+        """
+        if cls._steam_library_dirs is not None:
+            return cls._steam_library_dirs
+
+        _, home = Plugin._deck_user_info()
+        primary = f"{home}/.steam/steam"
+        vdf_path = f"{primary}/steamapps/libraryfolders.vdf"
+        dirs: list[str] = []
+        try:
+            with open(vdf_path, "r") as f:
+                content = f.read()
+            # libraryfolders.vdf is a KeyValues file. Each library is a numbered
+            # object with a "path" field. Regex is fine here — the format is
+            # flat enough that we don't need a full VDF parser for this lookup.
+            import re
+            for m in re.finditer(r'"path"\s+"([^"]+)"', content):
+                steamapps = os.path.join(m.group(1), "steamapps")
+                if os.path.isdir(steamapps):
+                    dirs.append(steamapps)
+        except FileNotFoundError:
+            decky.logger.warning(f"libraryfolders.vdf not found at {vdf_path}")
+        except Exception as e:
+            decky.logger.warning(f"Failed to parse libraryfolders.vdf: {e}")
+
+        # Fall back to the primary library if the vdf yielded nothing
+        if not dirs:
+            dirs = [f"{primary}/steamapps"]
+
+        cls._steam_library_dirs = dirs
+        decky.logger.info(f"Steam library steamapps dirs: {dirs}")
+        return dirs
+
+    @classmethod
+    def _steam_appmanifest_paths(cls, app_id: int) -> list[str]:
+        """Possible locations of an app's manifest file across library folders."""
+        return [
+            os.path.join(d, f"appmanifest_{app_id}.acf")
+            for d in cls._steam_library_steamapps_dirs()
+            if os.path.isfile(os.path.join(d, f"appmanifest_{app_id}.acf"))
+        ]
+
+    async def get_app_state_flags(self, app_id: int) -> int:
+        """Return StateFlags from an app's manifest, or -1 if no manifest.
+
+        StateFlags is a bitmask Steam uses to track install state. The bits
+        we care about:
+          2    UpdateRequired — newer version available
+          4    FullyInstalled — content on disk
+          6    FullyInstalled + UpdateRequired (Steam's queue UI shows these)
+          256  UpdateRunning, 512 UpdatePaused, 1024 UpdateStarted, etc.
+
+        Steam's "scheduled downloads" queue surfaces items where
+        (StateFlags & 6) == 6 — installed AND has an update to apply.
+        """
+        try:
+            paths = self._steam_appmanifest_paths(app_id)
+            if not paths:
+                return -1
+            with open(paths[0], "r") as f:
+                content = f.read()
+            import re
+            m = re.search(r'"StateFlags"\s+"(\d+)"', content)
+            return int(m.group(1)) if m else 0
+        except Exception as e:
+            decky.logger.warning(f"get_app_state_flags({app_id}) failed: {e}")
+            return -1
+
+    async def get_app_state_flags_batch(self, app_ids: list[int]) -> dict:
+        """Batch version of get_app_state_flags. Returns {appid_str: state_flags}.
+
+        Frontend uses this to filter the pending list to items that Steam
+        considers fully-installed-with-update (StateFlags & 6 == 6).
+        """
+        out: dict[str, int] = {}
+        for aid in app_ids or []:
+            try:
+                aid_int = int(aid)
+            except (TypeError, ValueError):
+                continue
+            out[str(aid_int)] = await self.get_app_state_flags(aid_int)
+        return out
+
+    async def force_steam_app_update(self, app_id: int) -> dict:
+        """Force a scheduled Steam app update to start now.
+
+        Post-Steam-update (May 2026), the CEF SteamClient APIs no longer clear
+        an app's ScheduledAutoUpdate (the user-visible "scheduled" state). The
+        only reliable approach we've found is:
+
+          1. Edit appmanifest_<app_id>.acf and set ScheduledAutoUpdate "0",
+             which removes the deferral.
+          2. Hand the appid to the running Steam client via
+             `steam steam://updateapp/<app_id>` so it picks up the manifest
+             change and queues the download immediately.
+
+        Returns {success, manifest_path, manifest_modified, url_invoked, error}.
+        """
+        result = {
+            "success": False,
+            "manifest_path": "",
+            "manifest_modified": False,
+            "url_invoked": False,
+            "error": "",
+        }
+        try:
+            paths = self._steam_appmanifest_paths(app_id)
+            if not paths:
+                result["error"] = f"No manifest found for appid {app_id}"
+                decky.logger.warning(result["error"])
+                return result
+            path = paths[0]
+            result["manifest_path"] = path
+            with open(path, "r") as f:
+                content = f.read()
+
+            # The ACF format uses tab-separated key/value pairs:
+            #   "ScheduledAutoUpdate"\t\t"1778928300"
+            # We replace any non-zero value with "0".
+            import re
+            new_content, n = re.subn(
+                r'("ScheduledAutoUpdate"\s+")[^"]*(")',
+                r'\g<1>0\g<2>',
+                content,
+                count=1,
+            )
+            if n > 0 and new_content != content:
+                with open(path, "w") as f:
+                    f.write(new_content)
+                result["manifest_modified"] = True
+                decky.logger.info(
+                    f"Cleared ScheduledAutoUpdate in {path}"
+                )
+            else:
+                self._debug(
+                    f"No ScheduledAutoUpdate field to clear in {path} (already 0?)"
+                )
+
+            # Hand the URL to the running Steam client. We don't need to
+            # capture output — Steam handles the URL asynchronously.
+            uid, _ = Plugin._deck_user_info()
+            rc, _, stderr = await self._run_cmd(
+                [
+                    "/usr/bin/runuser", "-u", "deck", "--",
+                    "/usr/bin/steam", f"steam://updateapp/{app_id}",
+                ],
+                timeout=15,
+                env={
+                    "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                    "XDG_RUNTIME_DIR": f"/run/user/{uid}",
+                    "DISPLAY": ":0",
+                    "HOME": f"/home/deck",
+                },
+            )
+            result["url_invoked"] = rc == 0
+            if rc != 0:
+                result["error"] = stderr.strip()[:200] or f"steam URL exited {rc}"
+
+            result["success"] = result["manifest_modified"] or result["url_invoked"]
+            return result
+        except Exception as e:
+            decky.logger.error(f"force_steam_app_update({app_id}) failed: {e}")
+            result["error"] = str(e)
+            return result
+
     async def ping(self) -> bool:
         """Fast IPC health check. Returns immediately."""
         self._debug("ping received")
