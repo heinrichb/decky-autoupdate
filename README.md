@@ -18,8 +18,7 @@ Steam schedules game updates instead of downloading them immediately, so on an a
 - Manual per-source "Check" buttons plus "Check All"
 - Configurable intervals (Steam 5-120 min, Flatpak 1-24 h)
 - Runs in the background with the panel closed
-- Expandable update details (game names, app names, sizes)
-- Color-coded status (green up to date, yellow pending, red error)
+- Color-coded status (green for handled / up-to-date, yellow for items pending action, red for errors)
 - History log of past checks
 - Optional toast notifications when updates are found
 
@@ -71,13 +70,31 @@ Flatpak logic lives in the Python backend because it needs to run system command
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed development setup instructions.
 
-Quick start:
+### Install from source onto your Steam Deck
+
+Clone, install deps, build + deploy. Works with **bun** (fastest), **pnpm**, or **npm**:
 
 ```bash
 git clone https://github.com/heinrichb/decky-autoupdate.git
 cd decky-autoupdate
-pnpm install
-pnpm build
+bun install            # or: pnpm install / npm install
+bun run deploy         # or: pnpm run deploy / npm run deploy
+```
+
+The `deploy` script (see `scripts/deploy.sh`) builds the frontend, copies the plugin files into `/home/deck/homebrew/plugins/AutoUpdate/` (via `sudo` — you'll be prompted), and restarts `plugin_loader`. The plugin shows up in Decky immediately after.
+
+To install `bun` first if you don't have it:
+
+```bash
+curl -fsSL https://bun.sh/install | bash
+```
+
+### Build only
+
+```bash
+bun run build          # produces dist/
+bun run test:ts        # vitest
+bun run test:py        # python unittest
 ```
 
 ## FAQ

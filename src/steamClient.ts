@@ -660,7 +660,14 @@ export async function forceStartAllUpdates(): Promise<UpdateCheckResult> {
     }
   }
 
-  for (const update of pending) {
+  // Only act on items the plugin actually has work for: those stuck in the
+  // "scheduled" state. Items already in `queued` or `downloading` are Steam's
+  // problem now — calling force-start on them is wasted work and pollutes the
+  // pendingCount we report to the user.
+  const scheduledPending = pending.filter((u) => u.state === "scheduled");
+  const scheduledBefore = scheduledPending.length;
+
+  for (const update of scheduledPending) {
     try {
       const ok = await forceStartUpdate(update.appId);
       if (ok) forcedCount++;
@@ -695,7 +702,6 @@ export async function forceStartAllUpdates(): Promise<UpdateCheckResult> {
   // out of scheduled" — i.e. downloads we actually started — not just "API
   // calls made without throwing". This matches what the user sees in Steam.
   if (forcedCount > 0) {
-    const scheduledBefore = pending.filter((u) => u.state === "scheduled").length;
     await new Promise((r) => setTimeout(r, 3000));
     let recheck = await getPendingUpdates();
     let stillScheduled = recheck.filter((u) => u.state === "scheduled");
@@ -756,34 +762,40 @@ export async function forceStartAllUpdates(): Promise<UpdateCheckResult> {
       }
     }
 
-    // Count what actually transitioned: pending items minus those still scheduled.
-    // The 3 already-queued items in `pending` shouldn't count as "started by us".
-    const startedCount = pending.length - stillScheduled.length - pending.filter((u) => u.state !== "scheduled").length;
-    const alreadyQueuedCount = pending.filter((u) => u.state !== "scheduled").length;
+    // pendingCount reflects only items the plugin actually had work for —
+    // scheduled items at the start of this check. Items already in queued/
+    // downloading state are Steam's job and excluded from our count. With this:
+    //   - "X of X started" when we transitioned all scheduled items (green)
+    //   - "0 of X" or "Y of X" when some stayed stuck (yellow via statusColor)
+    //   - "Up to date" when nothing was scheduled (green)
+    const startedCount = scheduledBefore - stillScheduled.length;
+    const alreadyQueuedCount = pending.length - scheduledBefore;
     log(
-      `Steam force-start summary: ${pending.length} pending (${scheduledBefore} scheduled, ${alreadyQueuedCount} already queued/downloading), ` +
+      `Steam force-start summary: ${scheduledBefore} scheduled (${alreadyQueuedCount} already queued/downloading were ignored), ` +
         `${Math.max(0, startedCount)} transitioned out of scheduled, ${stillScheduled.length} still stuck`,
     );
 
     return {
       source: "steam",
       timestamp,
-      pendingCount: Math.max(pending.length, recheck.length),
+      pendingCount: scheduledBefore,
       forcedCount: Math.max(0, startedCount),
       errors,
-      updates: recheck,
+      updates: scheduledPending,
       flatpakUpdates: [],
       deckyPluginUpdates: [],
     };
   }
 
+  // No scheduled items to act on — return a clean "up to date" result even if
+  // Steam has already-queued items in flight (those aren't ours to manage).
   return {
     source: "steam",
     timestamp,
-    pendingCount: pending.length,
-    forcedCount,
+    pendingCount: scheduledBefore,
+    forcedCount: 0,
     errors,
-    updates: pending,
+    updates: scheduledPending,
     flatpakUpdates: [],
     deckyPluginUpdates: [],
   };

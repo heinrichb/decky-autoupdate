@@ -175,18 +175,42 @@ export async function getAuthToken(): Promise<string> {
 /**
  * Open a WebSocket to Decky Loader, call a route, and return the result.
  * Opens a fresh connection per call for simplicity.
+ *
+ * Retries WS-close errors with exponential backoff. Decky's WS router can
+ * close mid-call when the plugin instance id changes (instance reload, loader
+ * restart, concurrent caller). One retry handles the common case; back-to-back
+ * reloads need more. We try up to 3 times: 2s, 4s, 8s.
  */
-function callDeckyMethod<T = unknown>(route: string, args: unknown[] = [], timeoutMs = 30_000): Promise<T> {
-  return callDeckyMethodOnce<T>(route, args, timeoutMs).catch((e) => {
-    const msg = e instanceof Error ? e.message : "";
-    if (msg.includes("WebSocket closed before reply") || msg.includes("WebSocket error calling")) {
-      debug(`callDeckyMethod: retrying ${route} after stale-instance close`);
-      return new Promise<T>((resolve) => setTimeout(resolve, 2000)).then(() =>
-        callDeckyMethodOnce<T>(route, args, timeoutMs),
-      );
+const WS_RETRY_DELAYS_MS = [2_000, 4_000, 8_000];
+
+function isTransientWsError(e: unknown): boolean {
+  const msg = e instanceof Error ? e.message : "";
+  return (
+    msg.includes("WebSocket closed before reply") ||
+    msg.includes("WebSocket error calling")
+  );
+}
+
+async function callDeckyMethod<T = unknown>(
+  route: string,
+  args: unknown[] = [],
+  timeoutMs = 30_000,
+): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= WS_RETRY_DELAYS_MS.length; attempt++) {
+    try {
+      return await callDeckyMethodOnce<T>(route, args, timeoutMs);
+    } catch (e) {
+      lastError = e;
+      if (!isTransientWsError(e) || attempt === WS_RETRY_DELAYS_MS.length) {
+        throw e;
+      }
+      const delay = WS_RETRY_DELAYS_MS[attempt];
+      debug(`callDeckyMethod: ${route} WS-closed (attempt ${attempt + 1}); retrying in ${delay}ms`);
+      await new Promise((r) => setTimeout(r, delay));
     }
-    throw e;
-  });
+  }
+  throw lastError;
 }
 
 function callDeckyMethodOnce<T = unknown>(route: string, args: unknown[] = [], timeoutMs = 30_000): Promise<T> {

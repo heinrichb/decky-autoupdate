@@ -107,8 +107,19 @@ export async function checkAndApplyFlatpak(autoApply: boolean): Promise<UpdateCh
       flatpakUpdates: r.updates,
     };
   } catch (e) {
-    logError("checkAndApplyFlatpak failed:", errorMessage(e));
-    return emptyResult("flatpak", [errorMessage(e)]);
+    const msg = errorMessage(e);
+    // WS closing repeatedly mid-call (after exhausting our retry budget) is a
+    // transient Decky-loader symptom — the next scheduled check will succeed
+    // once the loader settles. Don't escalate to a user-facing error.
+    if (msg.includes("WebSocket closed before reply") || msg.includes("WebSocket error calling")) {
+      logWarn(
+        "checkAndApplyFlatpak: Decky WS closed repeatedly — treating as transient, next check will retry. Error: " +
+          msg,
+      );
+      return emptyResult("flatpak");
+    }
+    logError("checkAndApplyFlatpak failed:", msg);
+    return emptyResult("flatpak", [msg]);
   }
 }
 
