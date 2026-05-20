@@ -111,6 +111,24 @@ class Plugin:
         validated["maxHistoryEntries"] = max(1, min(1000, validated["maxHistoryEntries"]))
         validated["deckyCheckIntervalMinutes"] = max(60, min(2880, validated["deckyCheckIntervalMinutes"]))
         validated["steamosCheckIntervalMinutes"] = max(60, min(2880, validated["steamosCheckIntervalMinutes"]))
+        validated["interCheckDelayMs"] = max(0, min(10000, validated["interCheckDelayMs"]))
+
+        # Validate checkOrder: dedup, remove unknown sources, append missing
+        valid_sources = {"steam", "flatpak", "decky", "decky-loader", "steamos"}
+        raw_order = validated.get("checkOrder", defaults["checkOrder"])
+        seen: set[str] = set()
+        clean: list[str] = []
+        for src in raw_order:
+            if src in valid_sources and src not in seen:
+                clean.append(src)
+                seen.add(src)
+        # Append any valid sources that were missing (preserves default tail order)
+        for src in defaults["checkOrder"]:
+            if src not in seen:
+                clean.append(src)
+                seen.add(src)
+        validated["checkOrder"] = clean
+
         return validated
 
     # --- History ---
@@ -696,6 +714,8 @@ class Plugin:
             "deckyLoaderUpdateEnabled": False,
             "steamosUpdateEnabled": False,
             "steamosCheckIntervalMinutes": 1440,
+            "interCheckDelayMs": 2000,
+            "checkOrder": ["steamos", "decky-loader", "decky", "flatpak", "steam"],
         }
         defaults_path = os.path.join(
             decky.DECKY_PLUGIN_DIR, "defaults", SETTINGS_FILENAME

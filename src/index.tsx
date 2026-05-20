@@ -2,7 +2,7 @@ import { definePlugin, toaster } from "@decky/api";
 import { ButtonItem, DropdownItem, PanelSection, PanelSectionRow, SliderField, ToggleField } from "@decky/ui";
 import { useState, useEffect, useCallback, useRef, ReactNode } from "react";
 import { MdUpdate } from "react-icons/md";
-import { SourceStatus } from "./types";
+import { SourceStatus, LIGHTEST_FIRST_ORDER, LEGACY_ORDER } from "./types";
 import { service, ServiceState } from "./autoUpdateService";
 import { PLUGIN_VERSION } from "./version";
 import { getInstalledPlugins, InstalledPlugin } from "./deckyApi";
@@ -72,6 +72,11 @@ const NOTIFICATION_OPTIONS = [
   { data: "off" as NotificationLevel, label: "Off" },
   { data: "updates-only" as NotificationLevel, label: "Updates only" },
   { data: "all" as NotificationLevel, label: "All checks" },
+];
+
+const CHECK_ORDER_OPTIONS = [
+  { data: "lightest", label: "Lightest first (recommended)" },
+  { data: "legacy", label: "Legacy order" },
 ];
 
 function AutoUpdatePanel() {
@@ -479,6 +484,45 @@ function AutoUpdatePanel() {
             description="Keep a log of past update activity"
             checked={settings.logHistory}
             onChange={(val) => update({ logHistory: val })}
+          />
+        </PanelSectionRow>
+
+        <PanelSectionRow>
+          <SliderField
+            label="Delay between checks"
+            description={`${(settings.interCheckDelayMs / 1000).toFixed(1)}s pause between each update source to reduce UI lag`}
+            value={settings.interCheckDelayMs / 1000}
+            min={0}
+            max={10}
+            step={0.5}
+            notchCount={5}
+            notchLabels={[
+              { notchIndex: 0, label: "0s" },
+              { notchIndex: 1, label: "2.5s" },
+              { notchIndex: 2, label: "5s" },
+              { notchIndex: 3, label: "7.5s" },
+              { notchIndex: 4, label: "10s" },
+            ]}
+            onChange={(val) => update({ interCheckDelayMs: Math.round(val * 1000) })}
+          />
+        </PanelSectionRow>
+
+        <PanelSectionRow>
+          <DropdownItem
+            label="Check order"
+            description="Order in which update sources are checked"
+            rgOptions={CHECK_ORDER_OPTIONS}
+            selectedOption={
+              settings.checkOrder.length === LEGACY_ORDER.length &&
+              settings.checkOrder.every((s, i) => s === LEGACY_ORDER[i])
+                ? "legacy"
+                : "lightest"
+            }
+            onChange={(opt) =>
+              update({
+                checkOrder: opt.data === "legacy" ? [...LEGACY_ORDER] : [...LIGHTEST_FIRST_ORDER],
+              })
+            }
           />
         </PanelSectionRow>
 

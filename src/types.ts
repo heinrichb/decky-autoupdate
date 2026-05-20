@@ -24,9 +24,14 @@ export interface Settings {
   deckyLoaderUpdateEnabled: boolean;
   steamosUpdateEnabled: boolean;
   steamosCheckIntervalMinutes: number;
+  interCheckDelayMs: number;
+  checkOrder: UpdateSource[];
 }
 
 export type UpdateSource = "steam" | "flatpak" | "decky" | "decky-loader" | "steamos";
+export const ALL_SOURCES: readonly UpdateSource[] = ["steam", "flatpak", "decky", "decky-loader", "steamos"];
+export const LIGHTEST_FIRST_ORDER: readonly UpdateSource[] = ["steamos", "decky-loader", "decky", "flatpak", "steam"];
+export const LEGACY_ORDER: readonly UpdateSource[] = ["steam", "flatpak", "decky", "decky-loader", "steamos"];
 export type Trigger = "auto" | "manual" | "wake" | "game-close";
 export type SourceStatus = "idle" | "checking" | "applying";
 
@@ -102,6 +107,8 @@ export const DEFAULT_SETTINGS: Settings = {
   deckyLoaderUpdateEnabled: false,
   steamosUpdateEnabled: false,
   steamosCheckIntervalMinutes: 1440,
+  interCheckDelayMs: 2000,
+  checkOrder: ["steamos", "decky-loader", "decky", "flatpak", "steam"],
 };
 
 // ── SteamClient download item shape (from CEF discovery) ──

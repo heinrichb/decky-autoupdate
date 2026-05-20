@@ -624,14 +624,16 @@ export async function forceStartUpdate(appId: number): Promise<boolean> {
  * Skips forcing if the system appears to be offline.
  */
 export async function forceStartAllUpdates(): Promise<UpdateCheckResult> {
-  const timestamp = Date.now();
+  const steamT0 = Date.now();
+  const timestamp = steamT0;
   const errors: string[] = [];
 
   debug("forceStartAllUpdates: navigator.onLine =", typeof navigator !== "undefined" ? navigator.onLine : "N/A");
 
+  const pendingT0 = Date.now();
   const pending = await getPendingUpdates();
   log(
-    `forceStartAllUpdates - found ${pending.length} pending updates: ${pending.map((u) => `${u.name}(${u.appId})[${u.state}]`).join(", ") || "none"}`,
+    `forceStartAllUpdates - getPendingUpdates in ${Date.now() - pendingT0}ms, found ${pending.length}: ${pending.map((u) => `${u.name}(${u.appId})[${u.state}]`).join(", ") || "none"}`,
   );
   let forcedCount = 0;
 
@@ -669,13 +671,19 @@ export async function forceStartAllUpdates(): Promise<UpdateCheckResult> {
   const scheduledPending = pending.filter((u) => u.state === "scheduled");
   const scheduledBefore = scheduledPending.length;
 
+  const forceLoopT0 = Date.now();
   for (const update of scheduledPending) {
     try {
+      const appT0 = Date.now();
       const ok = await forceStartUpdate(update.appId);
+      debug(`forceStartUpdate(${update.appId} ${update.name}): ${ok ? "ok" : "no-op"} in ${Date.now() - appT0}ms`);
       if (ok) forcedCount++;
     } catch (e) {
       errors.push(`${update.name} (${update.appId}): ${errorMessage(e)}`);
     }
+  }
+  if (scheduledPending.length > 0) {
+    log(`Force-start loop: ${scheduledPending.length} apps in ${Date.now() - forceLoopT0}ms, ${forcedCount} succeeded`);
   }
 
   // Diagnostic: after all the force-start calls, dump the raw DownloadItem of
@@ -707,8 +715,11 @@ export async function forceStartAllUpdates(): Promise<UpdateCheckResult> {
   // out of scheduled" — i.e. downloads we actually started — not just "API
   // calls made without throwing". This matches what the user sees in Steam.
   if (forcedCount > 0) {
+    debug("Steam: waiting 3s before re-check...");
     await new Promise((r) => setTimeout(r, 3000));
+    const recheckT0 = Date.now();
     let recheck = await getPendingUpdates();
+    debug(`Steam: re-check getPendingUpdates in ${Date.now() - recheckT0}ms`);
     let stillScheduled = recheck.filter((u) => u.state === "scheduled");
 
     // Retry pass: post-Steam-update, the first round of Queue/Resume calls
@@ -780,7 +791,8 @@ export async function forceStartAllUpdates(): Promise<UpdateCheckResult> {
     const alreadyQueuedCount = pending.length - scheduledBefore;
     log(
       `Steam force-start summary: ${scheduledBefore} scheduled (${alreadyQueuedCount} already queued/downloading were ignored), ` +
-        `${Math.max(0, startedCount)} transitioned out of scheduled, ${stillScheduled.length} still stuck`,
+        `${Math.max(0, startedCount)} transitioned out of scheduled, ${stillScheduled.length} still stuck` +
+        ` | total=${Date.now() - steamT0}ms`,
     );
 
     return {
@@ -797,6 +809,7 @@ export async function forceStartAllUpdates(): Promise<UpdateCheckResult> {
 
   // No scheduled items to act on — return a clean "up to date" result even if
   // Steam has already-queued items in flight (those aren't ours to manage).
+  log(`Steam check: no scheduled items to force-start | total=${Date.now() - steamT0}ms`);
   return {
     source: "steam",
     timestamp,

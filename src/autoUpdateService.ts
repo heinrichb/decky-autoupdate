@@ -19,6 +19,7 @@ import {
   SourceStatus,
   Trigger,
   DEFAULT_SETTINGS,
+  ALL_SOURCES,
   emptyResult,
 } from "./types";
 import { waitForSteamClient, registerForResume, registerForAppLifetime, probeSteamClientApi } from "./steamClient";
@@ -130,6 +131,10 @@ class AutoUpdateService {
   private runningGames = new Set<number>();
   private lastHeartbeat = 0;
   private started = false;
+  private _batchMode = false;
+  private _batchDirty = false;
+  private _driftProbeId: ReturnType<typeof setInterval> | null = null;
+  private _lastDriftProbe = 0;
 
   // ── Public API ─────────────────────────────────────────
 
@@ -165,6 +170,7 @@ class AutoUpdateService {
 
     // Availability checks are independent - run in parallel
     debug("Running availability checks...");
+    const availT0 = Date.now();
     const [, steamAvailable] = await Promise.all([
       isFlatpakAvailable()
         .then((v) => {
@@ -192,6 +198,7 @@ class AutoUpdateService {
           debug("SteamOS availability check error:", errorMessage(e));
         }),
     ]);
+    log(`Availability checks completed in ${Date.now() - availT0}ms`);
     this.state.steamReady = steamAvailable;
     log("SteamClient ready:", steamAvailable);
     if (steamAvailable) {
@@ -210,6 +217,7 @@ class AutoUpdateService {
     this.registerWakeDetection();
     this.registerGameDetection();
     this.rebuildPeriodicTimers();
+    this.startDriftProbe();
 
     let deckyVersion = "";
     if (this.state.deckyAvailable) {
@@ -266,7 +274,7 @@ class AutoUpdateService {
     lines.push(JSON.stringify(this.state.settings, null, 2));
 
     lines.push(`--- Last Check Results ---`);
-    const sources: UpdateSource[] = ["steam", "flatpak", "decky", "decky-loader", "steamos"];
+    const sources = ALL_SOURCES;
     for (const source of sources) {
       const { lastCheck } = SOURCE_FIELDS[source];
       const result = this.state[lastCheck];
@@ -302,6 +310,7 @@ class AutoUpdateService {
     }
     this.runningGames.clear();
     this.stopHeartbeat();
+    this.stopDriftProbe();
     this.clearTimer("steamTimerId");
     this.clearTimer("flatpakTimerId");
     this.clearTimer("deckyTimerId");
@@ -337,22 +346,63 @@ class AutoUpdateService {
 
   async triggerAll(trigger: Trigger = "manual"): Promise<UpdateCheckResult[]> {
     const s = this.state.settings;
-    const sources: UpdateSource[] = [];
 
-    if (s.steamEnabled && this.state.steamReady) sources.push("steam");
-    if (s.flatpakEnabled && this.state.flatpakAvailable) sources.push("flatpak");
-    if (s.deckyPluginUpdatesEnabled && this.state.deckyAvailable) sources.push("decky");
-    if (s.deckyLoaderUpdateEnabled && this.state.deckyAvailable) sources.push("decky-loader");
-    if (s.steamosUpdateEnabled && this.state.steamosAvailable) sources.push("steamos");
+    // Build the set of enabled + available sources
+    const enabledSet = new Set<UpdateSource>();
+    if (s.steamEnabled && this.state.steamReady) enabledSet.add("steam");
+    if (s.flatpakEnabled && this.state.flatpakAvailable) enabledSet.add("flatpak");
+    if (s.deckyPluginUpdatesEnabled && this.state.deckyAvailable) enabledSet.add("decky");
+    if (s.deckyLoaderUpdateEnabled && this.state.deckyAvailable) enabledSet.add("decky-loader");
+    if (s.steamosUpdateEnabled && this.state.steamosAvailable) enabledSet.add("steamos");
 
-    debug(`triggerAll(${trigger}): [${sources.join(", ")}]`);
+    // Use configured order, filtering to only enabled+available sources
+    const sources = s.checkOrder.filter((src) => enabledSet.has(src));
+    // Append any enabled sources not in checkOrder (defensive, handles new sources)
+    for (const src of enabledSet) {
+      if (!sources.includes(src)) sources.push(src);
+    }
+
+    const delayMs = s.interCheckDelayMs;
+    debug(`triggerAll(${trigger}): [${sources.join(", ")}] delay=${delayMs}ms`);
 
     // Run sequentially - Decky Loader closes WebSocket connections when
     // concurrent plugin method calls arrive on separate sockets.
+    // Batch mode suppresses per-check notify() to reduce React re-renders.
+    const batchT0 = Date.now();
     const results: UpdateCheckResult[] = [];
-    for (const source of sources) {
-      results.push(await this.runCheck(source, trigger));
+    const perSourceMs: string[] = [];
+    this._batchMode = true;
+    this._batchDirty = false;
+    try {
+      for (let i = 0; i < sources.length; i++) {
+        const checkT0 = Date.now();
+        results.push(await this.runCheck(sources[i], trigger));
+        perSourceMs.push(`${sources[i]}=${Date.now() - checkT0}ms`);
+
+        // Yield to UI thread between checks so Steam stays responsive
+        if (i < sources.length - 1 && delayMs > 0) {
+          const delayT0 = Date.now();
+          await new Promise((r) => setTimeout(r, delayMs));
+          const actualDelay = Date.now() - delayT0;
+          const drift = actualDelay - delayMs;
+          if (drift > 250) {
+            logWarn(
+              `Inter-check delay drift after ${sources[i]}: expected ${delayMs}ms, actual ${actualDelay}ms (${drift}ms late)`,
+            );
+          }
+        }
+      }
+    } finally {
+      const wasBatched = this._batchDirty;
+      this._batchMode = false;
+      if (wasBatched) this.notify();
     }
+
+    const batchElapsed = Date.now() - batchT0;
+    log(
+      `triggerAll(${trigger}): ${sources.length} sources in ${batchElapsed}ms` +
+        ` [${perSourceMs.join(", ")}]`,
+    );
     return results;
   }
 
@@ -380,7 +430,7 @@ class AutoUpdateService {
   private registerWakeDetection() {
     const unregister = registerForResume(() => {
       log("Wake detected (SteamClient event)");
-      this.handleWake();
+      this.handleWake("steamclient-event");
     });
 
     if (unregister) {
@@ -403,8 +453,9 @@ class AutoUpdateService {
       this.lastHeartbeat = now;
 
       if (gap > WAKE_THRESHOLD_MS) {
-        log(`Wake detected (heartbeat gap: ${Math.round(gap / 1000)}s)`);
-        this.handleWake();
+        const gapSec = Math.round(gap / 1000);
+        log(`Wake detected (heartbeat gap: ${gapSec}s)`);
+        this.handleWake(`heartbeat-gap-${gapSec}s`);
       }
     }, HEARTBEAT_INTERVAL_MS);
   }
@@ -416,28 +467,94 @@ class AutoUpdateService {
     }
   }
 
-  private async handleWake() {
+  // ── Event Loop Drift Probe ──────────────────────────────
+  // A lightweight 2-second interval that detects when the JS event loop is
+  // blocked (the actual symptom behind UI lag). Fires at INFO for severe
+  // drift (>500ms) and DEBUG for moderate drift (>250ms).
+
+  private static readonly DRIFT_PROBE_INTERVAL_MS = 2000;
+  private static readonly DRIFT_WARN_THRESHOLD_MS = 500;
+  private static readonly DRIFT_DEBUG_THRESHOLD_MS = 250;
+
+  private startDriftProbe() {
+    this.stopDriftProbe();
+    this._lastDriftProbe = Date.now();
+    this._driftProbeId = setInterval(() => {
+      const now = Date.now();
+      const elapsed = now - this._lastDriftProbe;
+      const drift = elapsed - AutoUpdateService.DRIFT_PROBE_INTERVAL_MS;
+      this._lastDriftProbe = now;
+
+      if (drift > AutoUpdateService.DRIFT_WARN_THRESHOLD_MS) {
+        logWarn(
+          `EventLoop drift: ${drift}ms late (expected ${AutoUpdateService.DRIFT_PROBE_INTERVAL_MS}ms, actual ${elapsed}ms)`,
+        );
+      } else if (drift > AutoUpdateService.DRIFT_DEBUG_THRESHOLD_MS) {
+        debug(
+          `EventLoop drift: ${drift}ms late (expected ${AutoUpdateService.DRIFT_PROBE_INTERVAL_MS}ms, actual ${elapsed}ms)`,
+        );
+      }
+    }, AutoUpdateService.DRIFT_PROBE_INTERVAL_MS);
+  }
+
+  private stopDriftProbe() {
+    if (this._driftProbeId) {
+      clearInterval(this._driftProbeId);
+      this._driftProbeId = null;
+    }
+  }
+
+  private async handleWake(wakeSource: string = "unknown") {
+    const wakeT0 = Date.now();
+    log(
+      `WAKE BEGIN source=${wakeSource} runningGames=${this.runningGames.size}` +
+        ` checkOnWake=${this.state.settings.checkOnWake}` +
+        ` interCheckDelayMs=${this.state.settings.interCheckDelayMs}` +
+        ` order=[${this.state.settings.checkOrder.join(",")}]`,
+    );
+
     if (!this.state.settings.checkOnWake) {
-      debug("Wake: checkOnWake is OFF, skipping");
+      log(`WAKE END source=${wakeSource} skipped=checkOnWake-off elapsed=${Date.now() - wakeT0}ms`);
       return;
     }
 
-    debug("Wake: waiting 8s for Steam to settle...");
+    // Phase 1: settle wait — if this takes materially longer than 8s the
+    // event loop was already contended during the wait itself
+    const settleT0 = Date.now();
     await new Promise((r) => setTimeout(r, 8000));
+    const settleMs = Date.now() - settleT0;
+    if (settleMs > 8500) {
+      logWarn(`Wake settle drift: expected ~8000ms, actual ${settleMs}ms (event loop contended)`);
+    } else {
+      debug(`Wake: settle wait completed in ${settleMs}ms`);
+    }
 
-    debug("Wake: waiting for network...");
+    // Phase 2: network wait
+    const netT0 = Date.now();
     const online = await waitForNetwork(30_000);
+    const netMs = Date.now() - netT0;
     if (!online) {
-      logWarn("Wake: network not available after 30s, skipping checks");
+      log(
+        `WAKE END source=${wakeSource} skipped=no-network` +
+          ` settle=${settleMs}ms network=${netMs}ms total=${Date.now() - wakeT0}ms`,
+      );
       return;
     }
-    debug("Wake: network available, starting checks");
+    log(`Wake: network ready in ${netMs}ms`);
 
+    // Phase 3: run all enabled checks
+    const checksT0 = Date.now();
     await this.runAllEnabledChecks("wake");
+    const checksMs = Date.now() - checksT0;
 
     // Reset periodic timers so next check fires one full interval from now,
     // not from the stale pre-sleep time
     this.rebuildPeriodicTimers();
+
+    log(
+      `WAKE END source=${wakeSource} settle=${settleMs}ms network=${netMs}ms` +
+        ` checks=${checksMs}ms total=${Date.now() - wakeT0}ms`,
+    );
   }
 
   private async handleStartupCheck() {
@@ -667,6 +784,10 @@ class AutoUpdateService {
   }
 
   private notify() {
+    if (this._batchMode) {
+      this._batchDirty = true;
+      return;
+    }
     this.listeners.forEach((fn) => {
       try {
         fn();

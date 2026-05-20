@@ -8,5 +8,7 @@
   "flatpakEnabled": true,
   "flatpakCheckIntervalMinutes": 360,
   "flatpakAutoApply": true,
-  "checkOnWake": true
+  "checkOnWake": true,
+  "interCheckDelayMs": 2000,
+  "checkOrder": ["steamos", "decky-loader", "decky", "flatpak", "steam"]
 }
