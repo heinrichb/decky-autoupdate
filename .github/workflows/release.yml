@@ -1,0 +1,52 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Check formatting
+        run: pnpm format:check
+
+      - name: Build
+        run: pnpm build
+
+      - name: TypeScript tests
+        run: pnpm test:ts
+
+      - name: Python tests
+        run: pnpm test:py
+
+      - name: Package plugin
+        run: |
+          mkdir -p release/AutoUpdate
+          cp -r dist assets plugin.json package.json main.py defaults LICENSE README.md release/AutoUpdate/
+          cd release && zip -r ../AutoUpdate-${{ github.ref_name }}.zip AutoUpdate/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: AutoUpdate-${{ github.ref_name }}.zip
+          generate_release_notes: true
