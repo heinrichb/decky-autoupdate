@@ -16,9 +16,10 @@ This file is a living document. Keep it up to date throughout development.
 **Milestone G (speed, reliability, QAM redesign)**: deployed 2026-10-02 16:16 and verified on device in Big Picture
 over CEF: no horizontal shift (`scrollLeft` stays 0 across every row, `scrollWidth` 300), Check All shows
 "Checking N of M", startup and manual batches run with no WS-closed retries and no `Dropping message` lines, the Flatpak
-check is ~0.75-1.2 s and reports `0 update(s), 1 masked` with no `flatpak update`, Decky Loader check ~0.3 s. A
+check is ~0.75-1.2 s and reports `0 update(s), 1 masked` with no `flatpak update`, Decky Loader check ~0.3 s. The
 follow-up commit (history labels wrap, count moved to the description; default pause 0.5 s; JSON files take the
-settings directory owner) still needs a redeploy.
+settings directory owner) was redeployed at 16:22 and verified: last check state restored after the reload, the
+startup check ran Steam only (others not due) in 89 ms, `check_state.json` is deck-owned, history labels wrap.
 
 Still to verify on device:
 1. Open the QAM panel in Game Mode or Big Picture: no 10 px horizontal shift when the D-pad reaches the status rows;
