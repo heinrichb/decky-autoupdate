@@ -13,10 +13,12 @@ Steam schedules game updates instead of downloading them immediately, so on an a
 ## Features
 
 - Steam game updates: periodic scan for pending/scheduled updates and force-start
-- Flatpak app updates: periodic check and background apply
+- Flatpak app updates: periodic check and background apply (masked refs are respected)
+- Decky plugin and Decky Loader updates, and SteamOS updates (downloaded and staged, never rebooted)
 - Independent toggles for each update source
-- Manual per-source "Check" buttons plus "Check All"
-- Configurable intervals (Steam 5-120 min, Flatpak 1-24 h)
+- Select a source's status row to check it now, plus "Check all now"
+- Configurable intervals (Steam 5 min-2 h, Flatpak 1-24 h, Decky and SteamOS 1-48 h)
+- Checks after waking from sleep and after closing a game, limited to sources whose interval has elapsed
 - Runs in the background with the panel closed
 - Color-coded status (green for handled / up-to-date, yellow for items pending action, red for errors)
 - History log of past checks
@@ -31,7 +33,7 @@ Steam schedules game updates instead of downloading them immediately, so on an a
 | Flatpak updates | on | on/off | Enable periodic Flatpak update checks |
 | Flatpak interval | 12 hours | 1-24 hours | How often to check for Flatpak updates |
 | Auto-apply Flatpak | on | on/off | Automatically install Flatpak updates when found |
-| Notifications | on | on/off | Show a toast notification after each check |
+| Notifications | when updates are found | off / when updates are found / after every check | Toast notifications |
 | Log history | on | on/off | Record past update checks for review |
 | Check on wake | on | on/off | Run update checks when resuming from sleep |
 
@@ -55,14 +57,14 @@ All settings persist across plugin reloads and system reboots.
 +-----------------------------------------------------+
 | Backend (Python -- runs as Decky plugin process)    |
 |                                                     |
-| main.py  Settings & history persistence             |
-|          Flatpak subprocess execution               |
+| main.py  Settings, history & check-state persistence|
+|          Flatpak and SteamOS subprocess execution   |
 |                                                     |
 | Owns: JSON read/write, flatpak CLI operations       |
 +-----------------------------------------------------+
 ```
 
-Steam logic lives on the frontend because `SteamClient` is a JS global in Steam's CEF context (no Python access). The frontend is alive for the whole Decky session, so `setInterval` is enough for a background timer.
+Steam logic lives on the frontend because `SteamClient` is a JS global in Steam's CEF context (no Python access). The frontend is alive for the whole Decky session, so a single due-time timer drives the background checks; the last result per source is persisted so intervals survive reloads.
 
 Flatpak logic lives in the Python backend because it needs to run system commands. The backend runs with root (via the `root` flag in `plugin.json`) and drops to the `deck` user via `runuser` to run user-scope flatpak commands.
 

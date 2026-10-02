@@ -10,7 +10,7 @@
  */
 
 import { PendingUpdate, UpdateCheckResult, DownloadItem } from "./types";
-import { log, logWarn, logError, debug, errorMessage } from "./helpers";
+import { log, logWarn, logError, debug, isDebugEnabled, errorMessage } from "./helpers";
 import { callPluginMethod } from "./deckyApi";
 
 interface ForceUpdateResult {
@@ -88,8 +88,12 @@ interface SteamClientDownloads {
 /** Local-Steam-self client ID used by all Downloads.* methods. Found in Steam UI bundle as `n.O = "0"`. */
 const LOCAL_CLIENT_ID = "0";
 
+interface ResumeProgress {
+  state?: number;
+}
+
 interface SteamClientUser {
-  RegisterForResumeSuspendedGamesProgress?(callback: () => void): Unregisterable;
+  RegisterForResumeSuspendedGamesProgress?(callback: (progress?: ResumeProgress) => void): Unregisterable;
   [key: string]: unknown;
 }
 
@@ -114,9 +118,7 @@ interface AppStore {
 // ── Helpers ──────────────────────────────────────────────────
 
 export function isSteamClientAvailable(): boolean {
-  const available = typeof SteamClient !== "undefined" && SteamClient !== null;
-  debug("isSteamClientAvailable:", available);
-  return available;
+  return typeof SteamClient !== "undefined" && SteamClient !== null;
 }
 
 /**
@@ -146,30 +148,41 @@ export function waitForSteamClient(timeoutMs = 30_000): Promise<boolean> {
   });
 }
 
+export interface ResumeRegistration {
+  unregister: () => void;
+  api: string;
+}
+
 /**
- * Register a callback for when the device resumes from sleep.
- * Returns an unregister function, or null if the API is unavailable.
+ * Register a callback for when the device resumes from sleep. The callback
+ * receives the `state` of Steam's resume progress payload (Complete = 1) when
+ * the registered API provides one.
+ * Returns the registration, or null if no resume API is available.
  */
-export function registerForResume(callback: () => void): (() => void) | null {
-  // Try the original API (SteamOS < May 2026)
+export function registerForResume(callback: (state: number | undefined) => void): ResumeRegistration | null {
+  // Original API (SteamOS < May 2026)
   try {
     const oldRegister = SteamClient?.System?.RegisterForOnResumeFromSuspend;
     if (typeof oldRegister === "function") {
-      const handle = oldRegister.call(SteamClient!.System, callback);
-      log("Wake detection: using System.RegisterForOnResumeFromSuspend");
-      return () => handle.unregister();
+      const handle = oldRegister.call(SteamClient!.System, () => callback(undefined));
+      const api = "System.RegisterForOnResumeFromSuspend";
+      log(`Wake detection: using ${api}`);
+      return { unregister: () => handle.unregister(), api };
     }
   } catch {
     /* continue to fallback */
   }
 
-  // Try the new API (SteamOS May 2026+)
+  // New API (SteamOS May 2026+)
   try {
     const newRegister = SteamClient?.User?.RegisterForResumeSuspendedGamesProgress;
     if (typeof newRegister === "function") {
-      const handle = newRegister.call(SteamClient!.User, callback);
-      log("Wake detection: using User.RegisterForResumeSuspendedGamesProgress");
-      return () => handle.unregister();
+      const handle = newRegister.call(SteamClient!.User, (progress) =>
+        callback(typeof progress?.state === "number" ? progress.state : undefined),
+      );
+      const api = "User.RegisterForResumeSuspendedGamesProgress";
+      log(`Wake detection: using ${api}`);
+      return { unregister: () => handle.unregister(), api };
     }
   } catch {
     /* fall through */
@@ -224,7 +237,8 @@ export function getDownloadBytes(item: DownloadItem): { downloaded: number; tota
 // ── Core API ─────────────────────────────────────────────────
 
 /**
- * Probe and log the shape of SteamClient APIs at startup.
+ * Probe the shape of SteamClient APIs at startup. Missing pieces are always
+ * reported; the full namespace dumps are debug-only.
  * Creates a diagnostic trail when Valve changes the internal API.
  */
 export function probeSteamClientApi(): void {
@@ -233,76 +247,75 @@ export function probeSteamClientApi(): void {
     return;
   }
 
-  const namespaces = Object.keys(SteamClient!).filter(
-    (k) =>
-      typeof (SteamClient as Record<string, unknown>)[k] === "object" &&
-      (SteamClient as Record<string, unknown>)[k] !== null,
-  );
-  log("SteamClient namespaces:", namespaces.join(", "));
-
   const dl = SteamClient!.Downloads;
   if (!dl) {
     logError("SteamClient.Downloads is missing!");
     return;
   }
-  const dlMethods = Object.keys(dl).filter((k) => typeof (dl as Record<string, unknown>)[k] === "function");
-  log("SteamClient.Downloads methods:", dlMethods.join(", "));
-
+  const dlRecord = dl as Record<string, unknown>;
   const expected = ["RegisterForDownloadItems", "ResumeAppUpdate", "EnableAllDownloads"];
-  const missing = expected.filter((m) => typeof (dl as Record<string, unknown>)[m] !== "function");
+  const missing = expected.filter((m) => typeof dlRecord[m] !== "function");
   if (missing.length > 0) {
     logError("SteamClient.Downloads MISSING expected methods:", missing.join(", "));
   }
 
-  // Probe Updates namespace too — relevant for forcing scheduled-state apps to start
+  if (!isDebugEnabled()) return;
+
   const sc = SteamClient as Record<string, unknown>;
+  const namespaces = Object.keys(sc).filter((k) => typeof sc[k] === "object" && sc[k] !== null);
+  debug("SteamClient namespaces:", namespaces.join(", "));
+  debug(
+    "SteamClient.Downloads methods:",
+    Object.keys(dlRecord)
+      .filter((k) => typeof dlRecord[k] === "function")
+      .join(", "),
+  );
+
+  // Updates namespace: relevant for forcing scheduled-state apps to start
   const updates = sc.Updates as Record<string, unknown> | undefined;
   if (updates && typeof updates === "object") {
     const updateMethods = Object.keys(updates).filter((k) => typeof updates[k] === "function");
-    log("SteamClient.Updates methods:", updateMethods.join(", ") || "(none)");
+    debug("SteamClient.Updates methods:", updateMethods.join(", ") || "(none)");
   } else {
     debug("SteamClient.Updates namespace not present");
   }
 
-  // Probe Apps namespace for app-level update operations
   const apps = sc.Apps as Record<string, unknown> | undefined;
   if (apps && typeof apps === "object") {
     const appMethods = Object.keys(apps)
       .filter((k) => typeof apps[k] === "function")
       .filter((k) => /update|install|download|queue|resume/i.test(k));
     if (appMethods.length > 0) {
-      log("SteamClient.Apps update-related methods:", appMethods.join(", "));
+      debug("SteamClient.Apps update-related methods:", appMethods.join(", "));
     }
   }
 
-  // Probe Settings namespace for download-schedule-related methods (often where
-  // scheduled-download time / restricted-download-hours toggles live).
+  // Settings namespace: download-schedule-related methods (scheduled-download
+  // time / restricted-download-hours toggles).
   const settings = sc.Settings as Record<string, unknown> | undefined;
   if (settings && typeof settings === "object") {
     const settingMethods = Object.keys(settings)
       .filter((k) => typeof settings[k] === "function")
       .filter((k) => /download|schedule|throttle|restrict/i.test(k));
     if (settingMethods.length > 0) {
-      log("SteamClient.Settings download-related methods:", settingMethods.join(", "));
+      debug("SteamClient.Settings download-related methods:", settingMethods.join(", "));
     }
   }
 
-  // Probe Installs namespace
   const installs = sc.Installs as Record<string, unknown> | undefined;
   if (installs && typeof installs === "object") {
     const installMethods = Object.keys(installs).filter((k) => typeof installs[k] === "function");
     if (installMethods.length > 0) {
-      log("SteamClient.Installs methods:", installMethods.join(", "));
+      debug("SteamClient.Installs methods:", installMethods.join(", "));
     }
   }
 
   // Wide net: scan ALL namespaces for any method name containing download/
-  // update/schedule/defer/start. This is how we'll find the Steam UI's
-  // "Update Now" backing call if it lives somewhere unexpected.
+  // update/schedule/defer/start, in case the Steam UI's "Update Now" backing
+  // call lives somewhere unexpected.
   const seen: string[] = [];
   for (const ns of namespaces) {
     const obj = sc[ns] as Record<string, unknown>;
-    if (!obj || typeof obj !== "object") continue;
     for (const k of Object.keys(obj)) {
       if (typeof obj[k] !== "function") continue;
       if (/start|defer|schedule|forcestart|forceupdate|updatenow|downloadnow/i.test(k)) {
@@ -311,34 +324,29 @@ export function probeSteamClientApi(): void {
     }
   }
   if (seen.length > 0) {
-    log("SteamClient methods matching start/defer/schedule:", seen.join(", "));
+    debug("SteamClient methods matching start/defer/schedule:", seen.join(", "));
   }
 
-  // Steam UI uses MobX stores accessible from the global window. The
-  // Library "Update Now" button's handler lives in one of these. Probe for
-  // any download-related store globals and their methods.
+  // The Library "Update Now" handler lives in one of the MobX stores exposed
+  // on window; list the download-related globals and their callable members.
   try {
     const w = window as unknown as Record<string, unknown>;
     const downloadGlobals = Object.keys(w).filter((k) =>
       /download|update|library|app(s|details|info)?store|queue/i.test(k),
     );
     if (downloadGlobals.length > 0) {
-      log("Global download/update-related window keys:", downloadGlobals.join(", "));
+      debug("Global download/update-related window keys:", downloadGlobals.join(", "));
     }
 
-    // For each promising global that's an object, list its callable members.
     for (const name of downloadGlobals) {
       const v = w[name];
       if (v && typeof v === "object") {
         const methods = Object.keys(v as Record<string, unknown>).filter(
           (k) => typeof (v as Record<string, unknown>)[k] === "function",
         );
-        // Limit to methods that sound related to update/queue/download/start
-        const filtered = methods.filter((m) =>
-          /update|queue|download|start|schedule|defer|resume/i.test(m),
-        );
+        const filtered = methods.filter((m) => /update|queue|download|start|schedule|defer|resume/i.test(m));
         if (filtered.length > 0) {
-          log(`window.${name} matching methods:`, filtered.slice(0, 30).join(", "));
+          debug(`window.${name} matching methods:`, filtered.slice(0, 30).join(", "));
         }
       }
     }
@@ -398,163 +406,192 @@ export function getRawDownloadItems(): Promise<DownloadItem[]> {
   });
 }
 
+const STATE_FLAGS_FULLY_INSTALLED = 4;
+const STATE_FLAGS_UPDATE_REQUIRED = 2;
+const STATE_FLAGS_QUEUE_MASK = STATE_FLAGS_FULLY_INSTALLED | STATE_FLAGS_UPDATE_REQUIRED;
+
+function maxProgressBytes(item: DownloadItem): number {
+  const progress = item.update_type_info?.[0]?.progress ?? [];
+  return progress.reduce((m, p) => Math.max(m, p?.bytes_total ?? 0), 0);
+}
+
 /**
- * Enumerate all games that have pending or scheduled updates by reading
- * the Steam download queue via RegisterForDownloadItems.
- *
- * The callback fires immediately with the current state, so we wrap it
- * in a Promise that resolves on the first invocation and then unregisters.
+ * Same known build and nothing to download: Steam keeps re-scheduling these, but there is no update to start.
+ * Build 0 -> 0 is not a known build: Steam reports real scheduled updates that way until they begin.
  */
-export function getPendingUpdates(): Promise<PendingUpdate[]> {
+function isNoOpItem(item: DownloadItem): boolean {
+  return item.buildid > 0 && item.buildid === item.target_buildid && maxProgressBytes(item) === 0;
+}
+
+function isBetterEntry(candidate: DownloadItem, current: DownloadItem): boolean {
+  const candidateTarget = Number(candidate.target_buildid) || 0;
+  const currentTarget = Number(current.target_buildid) || 0;
+  if (candidateTarget !== currentTarget) return candidateTarget > currentTarget;
+  if (!!candidate.active !== !!current.active) return !!candidate.active;
+  const candidateQueued = candidate.queue_index >= 0;
+  const currentQueued = current.queue_index >= 0;
+  if (candidateQueued !== currentQueued) return candidateQueued;
+  const candidateDeferred = candidate.deferred_time > 0;
+  const currentDeferred = current.deferred_time > 0;
+  if (candidateDeferred !== currentDeferred) return !candidateDeferred;
+  return false;
+}
+
+/** Steam can list several entries for one app; only the newest build's entry is actionable. */
+function dedupeByAppId(items: DownloadItem[]): DownloadItem[] {
+  const byApp = new Map<number, DownloadItem>();
+  for (const item of items) {
+    const current = byApp.get(item.appid);
+    if (!current || isBetterEntry(item, current)) byApp.set(item.appid, item);
+  }
+  const ignored = items.length - byApp.size;
+  if (ignored > 0) debug(`getPendingUpdates: ignored ${ignored} superseded duplicate items`);
+  return [...byApp.values()];
+}
+
+function toPendingUpdate(item: DownloadItem): PendingUpdate {
+  const bytes = getDownloadBytes(item);
+  return {
+    appId: item.appid,
+    name: getAppName(item.appid),
+    bytesToDownload: bytes.total,
+    bytesDownloaded: bytes.downloaded,
+    state: determineState(item),
+  };
+}
+
+function logDownloadItems(items: DownloadItem[]): void {
+  const sample = items[0];
+  debug(
+    "getPendingUpdates: sample item keys:",
+    Object.keys(sample).join(", "),
+    "| appid:",
+    sample.appid,
+    "completed:",
+    sample.completed,
+    "has_update:",
+    sample.update_type_info?.[0]?.has_update ?? "N/A",
+  );
+  // Format per item:
+  //   appid|name|active|paused|completed|deferred_time|queue_index|
+  //     has_update[0..2]|maxBytes|update_result|build->target
+  const compact = items.map((it) => {
+    const hasUpdateFlags = (it.update_type_info ?? []).map((u) => (u?.has_update ? "1" : "0")).join("");
+    return (
+      `${it.appid}|${getAppName(it.appid)}|` +
+      `a=${it.active ? 1 : 0}|p=${it.paused ? 1 : 0}|c=${it.completed ? 1 : 0}|` +
+      `def=${it.deferred_time ?? 0}|qi=${it.queue_index ?? -99}|` +
+      `hu=${hasUpdateFlags}|maxB=${maxProgressBytes(it)}|` +
+      `rc=${it.update_result ?? "?"}|b=${it.buildid}->${it.target_buildid}`
+    );
+  });
+  debug("getPendingUpdates: ALL items compact dump:\n  " + compact.join("\n  "));
+}
+
+async function buildPendingUpdates(rawItems: unknown[], isDownloading: boolean): Promise<PendingUpdate[]> {
+  const items = extractDownloadItems(rawItems);
+  debug(
+    "getPendingUpdates: received",
+    rawItems.length,
+    "raw items, extracted",
+    items.length,
+    "download items, isDownloading:",
+    isDownloading,
+  );
+
+  if (items.length > 0 && isDebugEnabled()) {
+    try {
+      logDownloadItems(items);
+    } catch (e) {
+      logWarn("getPendingUpdates: failed to log sample item:", errorMessage(e));
+    }
+  }
+
+  const candidates = dedupeByAppId(items).filter(
+    (item) => !item.completed && item.update_type_info?.[0]?.has_update && !isNoOpItem(item),
+  );
+  if (candidates.length === 0) return [];
+
+  // Steam's queue UI only shows items where StateFlags & 6 == 6
+  // (FullyInstalled + UpdateRequired). The DownloadItem API doesn't
+  // expose StateFlags, so ask the backend to read each app's manifest.
+  const appIds = candidates.map((c) => c.appid);
+  try {
+    const flagsByAppId = await callPluginMethod<Record<string, number>>("get_app_state_flags_batch", [appIds], 8_000);
+    const filtered = candidates.filter((item) => {
+      const flags = flagsByAppId[String(item.appid)];
+      if (flags == null || flags < 0) {
+        // No local manifest (uninstalled/owned app): Steam doesn't queue these.
+        debug(`getPendingUpdates: excluding ${item.appid} (${getAppName(item.appid)}) — no manifest`);
+        return false;
+      }
+      if ((flags & STATE_FLAGS_QUEUE_MASK) !== STATE_FLAGS_QUEUE_MASK) {
+        debug(
+          `getPendingUpdates: excluding ${item.appid} (${getAppName(item.appid)}) — ` +
+            `StateFlags=${flags} doesn't match queue mask (${STATE_FLAGS_QUEUE_MASK})`,
+        );
+        return false;
+      }
+      return true;
+    });
+    log(`getPendingUpdates: ${candidates.length} candidates -> ${filtered.length} after StateFlags filter`);
+    return filtered.map(toPendingUpdate);
+  } catch (e) {
+    // Degrade to the looser filter rather than reporting zero updates.
+    logWarn("getPendingUpdates: StateFlags lookup failed, falling back to loose filter:", errorMessage(e));
+    return candidates.map(toPendingUpdate);
+  }
+}
+
+/**
+ * Read the Steam download queue via RegisterForDownloadItems. The callback fires
+ * immediately with the current state, so we wrap it in a Promise that resolves on
+ * the first invocation and then unregisters.
+ *
+ * Resolves null when Steam did not report its state (no SteamClient, timeout, or
+ * an exception), which callers must not mistake for "nothing is pending".
+ */
+function readPendingUpdates(): Promise<PendingUpdate[] | null> {
   if (!isSteamClientAvailable()) {
     logWarn("SteamClient not available");
-    return Promise.resolve([]);
+    return Promise.resolve(null);
   }
 
   debug("getPendingUpdates: registering for download items...");
   return new Promise((resolve) => {
     let unsub: { unregister: () => void } | null = null;
+    let fired = false;
 
     const timeout = setTimeout(() => {
       logWarn("getPendingUpdates timed out - callback never fired");
       unsub?.unregister();
-      resolve([]);
+      resolve(null);
     }, 10_000);
 
     try {
-      unsub = SteamClient!.Downloads.RegisterForDownloadItems((_isDownloading: boolean, rawItems: unknown[]) => {
+      unsub = SteamClient!.Downloads.RegisterForDownloadItems((isDownloading: boolean, rawItems: unknown[]) => {
+        fired = true;
         clearTimeout(timeout);
         unsub?.unregister();
-
-        const items = extractDownloadItems(rawItems || []);
-        debug(
-          "getPendingUpdates: received",
-          rawItems?.length ?? 0,
-          "raw items, extracted",
-          items.length,
-          "download items, isDownloading:",
-          _isDownloading,
+        resolve(
+          buildPendingUpdates(rawItems || [], isDownloading).catch((e) => {
+            logError("getPendingUpdates failed:", errorMessage(e));
+            return null;
+          }),
         );
-
-        if (items.length > 0) {
-          try {
-            const sample = items[0];
-            debug(
-              "getPendingUpdates: sample item keys:",
-              Object.keys(sample).join(", "),
-              "| appid:",
-              sample.appid,
-              "completed:",
-              sample.completed,
-              "has_update:",
-              sample.update_type_info?.[0]?.has_update ?? "N/A",
-            );
-            // Compact dump of ALL items so we can compare what we see against
-            // Steam's UI queue. Format per item:
-            //   appid|name|active|paused|completed|deferred_time|queue_index|
-            //     has_update[0..2]|maxBytes|update_result|build->target
-            const compact = items.map((it) => {
-              const progress = it.update_type_info?.[0]?.progress ?? [];
-              const maxBytes = progress.reduce(
-                (m, p) => Math.max(m, p?.bytes_total ?? 0),
-                0,
-              );
-              const hasUpdateFlags = (it.update_type_info ?? [])
-                .map((u) => (u?.has_update ? "1" : "0"))
-                .join("");
-              return (
-                `${it.appid}|${getAppName(it.appid)}|` +
-                `a=${it.active ? 1 : 0}|p=${it.paused ? 1 : 0}|c=${it.completed ? 1 : 0}|` +
-                `def=${it.deferred_time ?? 0}|qi=${it.queue_index ?? -99}|` +
-                `hu=${hasUpdateFlags}|maxB=${maxBytes}|` +
-                `rc=${it.update_result ?? "?"}|b=${it.buildid}->${it.target_buildid}`
-              );
-            });
-            // Diagnostic only — gated behind debug to avoid log noise in normal operation.
-            // Used for diagnosing pendingCount mismatches between plugin and Steam UI.
-            debug("getPendingUpdates: ALL items compact dump:\n  " + compact.join("\n  "));
-          } catch (e) {
-            logWarn("getPendingUpdates: failed to log sample item:", errorMessage(e));
-          }
-        }
-
-        // Initial coarse filter: needs an update flag and isn't completed.
-        const candidates = items.filter(
-          (item) => !item.completed && item.update_type_info?.[0]?.has_update,
-        );
-
-        // Steam's queue UI only shows items where StateFlags & 6 == 6
-        // (FullyInstalled + UpdateRequired). The DownloadItem API doesn't
-        // expose StateFlags, so ask the backend to read each app's manifest.
-        // This is what gets our count to match Steam's UI exactly.
-        const appIds = candidates.map((c) => c.appid);
-        const STATE_FLAGS_FULLY_INSTALLED = 4;
-        const STATE_FLAGS_UPDATE_REQUIRED = 2;
-        const STATE_FLAGS_QUEUE_MASK = STATE_FLAGS_FULLY_INSTALLED | STATE_FLAGS_UPDATE_REQUIRED; // 6
-
-        callPluginMethod<Record<string, number>>("get_app_state_flags_batch", [appIds], 8_000)
-          .then((flagsByAppId) => {
-            const filtered = candidates.filter((item) => {
-              const flags = flagsByAppId[String(item.appid)];
-              if (flags == null || flags < 0) {
-                // Backend couldn't read the manifest (uninstalled/owned app).
-                // Steam doesn't queue these — exclude.
-                debug(
-                  `getPendingUpdates: excluding ${item.appid} (${getAppName(item.appid)}) — no manifest`,
-                );
-                return false;
-              }
-              if ((flags & STATE_FLAGS_QUEUE_MASK) !== STATE_FLAGS_QUEUE_MASK) {
-                debug(
-                  `getPendingUpdates: excluding ${item.appid} (${getAppName(item.appid)}) — ` +
-                    `StateFlags=${flags} doesn't match queue mask (6)`,
-                );
-                return false;
-              }
-              return true;
-            });
-
-            const pending: PendingUpdate[] = filtered.map((item) => {
-              const bytes = getDownloadBytes(item);
-              return {
-                appId: item.appid,
-                name: getAppName(item.appid),
-                bytesToDownload: bytes.total,
-                bytesDownloaded: bytes.downloaded,
-                state: determineState(item),
-              };
-            });
-            log(
-              `getPendingUpdates: ${candidates.length} candidates -> ${pending.length} after StateFlags filter`,
-            );
-            resolve(pending);
-          })
-          .catch((e) => {
-            // If the backend lookup fails, fall back to the looser filter so
-            // we degrade gracefully rather than reporting zero updates.
-            logWarn(
-              "getPendingUpdates: StateFlags lookup failed, falling back to loose filter:",
-              errorMessage(e),
-            );
-            const pending: PendingUpdate[] = candidates.map((item) => {
-              const bytes = getDownloadBytes(item);
-              return {
-                appId: item.appid,
-                name: getAppName(item.appid),
-                bytesToDownload: bytes.total,
-                bytesDownloaded: bytes.downloaded,
-                state: determineState(item),
-              };
-            });
-            resolve(pending);
-          });
       });
+      if (fired) unsub?.unregister();
     } catch (e) {
       clearTimeout(timeout);
       logError("Failed to enumerate downloads:", e);
-      resolve([]);
+      resolve(null);
     }
   });
+}
+
+/** Enumerate all games that have pending or scheduled updates; empty when Steam did not report. */
+export async function getPendingUpdates(): Promise<PendingUpdate[]> {
+  return (await readPendingUpdates()) ?? [];
 }
 
 /**
@@ -619,6 +656,40 @@ export async function forceStartUpdate(appId: number): Promise<boolean> {
   return calledSomething;
 }
 
+const RECHECK_INTERVAL_MS = 500;
+const RECHECK_TIMEOUT_MS = 4_000;
+const BACKEND_RECHECK_TIMEOUT_MS = 6_000;
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+interface LeftScheduledResult {
+  stillScheduled: PendingUpdate[];
+  /** True when the last read failed, so `stillScheduled` is only what the last good read showed. */
+  unknown: boolean;
+}
+
+/**
+ * Poll the download queue until none of `targets` is scheduled any more, or
+ * `timeoutMs` has passed. A failed read is unknown, not empty: keep polling and
+ * fall back to the last good read (or `targets` when none succeeded).
+ */
+async function waitForLeftScheduled(targets: PendingUpdate[], timeoutMs: number): Promise<LeftScheduledResult> {
+  const appIds = new Set(targets.map((u) => u.appId));
+  const deadline = Date.now() + timeoutMs;
+  let stillScheduled = targets;
+  for (;;) {
+    await sleep(RECHECK_INTERVAL_MS);
+    const read = await readPendingUpdates();
+    if (read) {
+      stillScheduled = read.filter((u) => u.state === "scheduled" && appIds.has(u.appId));
+      if (stillScheduled.length === 0) return { stillScheduled, unknown: false };
+    }
+    if (Date.now() >= deadline) return { stillScheduled, unknown: read === null };
+  }
+}
+
+const UNKNOWN_STATE_ERROR = "Steam did not report download state";
+
 /**
  * Force-start all pending updates. Returns a summary of what happened.
  * Skips forcing if the system appears to be offline.
@@ -631,29 +702,41 @@ export async function forceStartAllUpdates(): Promise<UpdateCheckResult> {
   debug("forceStartAllUpdates: navigator.onLine =", typeof navigator !== "undefined" ? navigator.onLine : "N/A");
 
   const pendingT0 = Date.now();
-  const pending = await getPendingUpdates();
+  const pending = await readPendingUpdates();
+  if (!pending) {
+    logWarn("forceStartAllUpdates: Steam did not report the download queue, nothing was started");
+    return {
+      source: "steam",
+      timestamp,
+      pendingCount: 0,
+      forcedCount: 0,
+      errors: [`${UNKNOWN_STATE_ERROR}; could not check for updates`],
+      updates: [],
+      flatpakUpdates: [],
+      deckyPluginUpdates: [],
+    };
+  }
   log(
     `forceStartAllUpdates - getPendingUpdates in ${Date.now() - pendingT0}ms, found ${pending.length}: ${pending.map((u) => `${u.name}(${u.appId})[${u.state}]`).join(", ") || "none"}`,
   );
-  let forcedCount = 0;
 
-  if (pending.length > 0) {
+  // Only act on items the plugin actually has work for: those stuck in the
+  // "scheduled" state. Items already in `queued` or `downloading` are Steam's
+  // problem now.
+  const scheduledPending = pending.filter((u) => u.state === "scheduled");
+  const scheduledBefore = scheduledPending.length;
+  const scheduledIds = new Set(scheduledPending.map((u) => u.appId));
+
+  if (scheduledBefore > 0) {
     // Globally unpause/unschedule the download queue before per-app forcing.
-    // Recent Steam builds appear to leave items stuck in "scheduled" even after
-    // ResumeAppUpdate. We pair these three calls because each clears a
-    // different gate that can keep a download "scheduled":
     //   - EnableAllDownloads(true): downloads-paused master switch
     //   - SuspendDownloadThrottling(true): off-peak/scheduled-hours throttle
-    //   - MoveAppUpdateUp(appId): force to top of queue (per-app, later)
     try {
       SteamClient!.Downloads.EnableAllDownloads(true, LOCAL_CLIENT_ID);
       debug(`EnableAllDownloads(true, "${LOCAL_CLIENT_ID}")`);
     } catch (e) {
       logError("EnableAllDownloads failed:", e);
     }
-    // SuspendDownloadThrottling(true, clientId) tells Steam to suspend its
-    // throttling/scheduling logic — i.e. ignore "off-peak hours" or "pause
-    // during gameplay" rules so the queue can run NOW.
     if (typeof SteamClient!.Downloads.SuspendDownloadThrottling === "function") {
       try {
         SteamClient!.Downloads.SuspendDownloadThrottling(true, LOCAL_CLIENT_ID);
@@ -664,142 +747,33 @@ export async function forceStartAllUpdates(): Promise<UpdateCheckResult> {
     }
   }
 
-  // Only act on items the plugin actually has work for: those stuck in the
-  // "scheduled" state. Items already in `queued` or `downloading` are Steam's
-  // problem now — calling force-start on them is wasted work and pollutes the
-  // pendingCount we report to the user.
-  const scheduledPending = pending.filter((u) => u.state === "scheduled");
-  const scheduledBefore = scheduledPending.length;
-
+  let calledCount = 0;
   const forceLoopT0 = Date.now();
   for (const update of scheduledPending) {
     try {
       const appT0 = Date.now();
       const ok = await forceStartUpdate(update.appId);
       debug(`forceStartUpdate(${update.appId} ${update.name}): ${ok ? "ok" : "no-op"} in ${Date.now() - appT0}ms`);
-      if (ok) forcedCount++;
+      if (ok) calledCount++;
     } catch (e) {
       errors.push(`${update.name} (${update.appId}): ${errorMessage(e)}`);
     }
   }
-  if (scheduledPending.length > 0) {
-    log(`Force-start loop: ${scheduledPending.length} apps in ${Date.now() - forceLoopT0}ms, ${forcedCount} succeeded`);
+  if (scheduledBefore > 0) {
+    log(`Force-start loop: ${scheduledBefore} apps in ${Date.now() - forceLoopT0}ms, ${calledCount} calls made`);
   }
 
-  // Diagnostic: after all the force-start calls, dump the raw DownloadItem of
-  // the first scheduled app to see whether any of our calls had measurable
-  // effect on its fields (deferred_time, queue_index, paused, etc.). Compare
-  // this with the pre-force dump in getPendingUpdates to see what changed.
-  if (pending.length > 0 && pending.some((u) => u.state === "scheduled")) {
-    try {
-      const firstScheduledId = pending.find((u) => u.state === "scheduled")?.appId;
-      if (firstScheduledId != null) {
-        await new Promise((r) => setTimeout(r, 500));
-        const postItems = await getRawDownloadItems();
-        const post = postItems.find((it) => it.appid === firstScheduledId);
-        // Diagnostic only — gated behind debug. Compares with the pre-force
-        // compact dump to confirm fields actually changed (use this when a
-        // force-start appears to silently fail in the future).
-        debug(
-          `POST-FORCE raw DownloadItem for appid=${firstScheduledId}:`,
-          post ? JSON.stringify(post) : "(no longer in download list)",
-        );
-      }
-    } catch (e) {
-      debug("Post-force dump failed:", errorMessage(e));
+  if (calledCount === 0) {
+    if (scheduledBefore === 0) {
+      log(`Steam check: no scheduled items to force-start | total=${Date.now() - steamT0}ms`);
+    } else {
+      logWarn(`Steam force-start: no SteamClient call succeeded for ${scheduledBefore} scheduled app(s)`);
     }
-  }
-
-  // Re-check after a short delay to get accurate post-force state.
-  // `forcedCount` is reinterpreted here to mean "items that successfully moved
-  // out of scheduled" — i.e. downloads we actually started — not just "API
-  // calls made without throwing". This matches what the user sees in Steam.
-  if (forcedCount > 0) {
-    debug("Steam: waiting 3s before re-check...");
-    await new Promise((r) => setTimeout(r, 3000));
-    const recheckT0 = Date.now();
-    let recheck = await getPendingUpdates();
-    debug(`Steam: re-check getPendingUpdates in ${Date.now() - recheckT0}ms`);
-    let stillScheduled = recheck.filter((u) => u.state === "scheduled");
-
-    // Retry pass: post-Steam-update, the first round of Queue/Resume calls
-    // sometimes leaves apps scheduled. Re-issue the calls and wait again.
-    if (stillScheduled.length > 0) {
-      logWarn(
-        `${stillScheduled.length} of ${scheduledBefore} update(s) still scheduled after first pass — retrying: ${stillScheduled.map((u) => u.name).join(", ")}`,
-      );
-      for (const update of stillScheduled) {
-        await forceStartUpdate(update.appId);
-      }
-      await new Promise((r) => setTimeout(r, 5000));
-      recheck = await getPendingUpdates();
-      stillScheduled = recheck.filter((u) => u.state === "scheduled");
-      if (stillScheduled.length > 0) {
-        logWarn(
-          `${stillScheduled.length} of ${scheduledBefore} update(s) still scheduled after retry: ${stillScheduled.map((u) => u.name).join(", ")}`,
-        );
-      } else {
-        log("All previously-stuck updates transitioned out of scheduled state on retry");
-      }
-    }
-
-    // Last-resort pass: kept as a safety net for the case where Steam ships
-    // another API regression and the CEF retry path stops working. Should
-    // not fire in normal operation — the QueueAppUpdate + ResumeAppUpdate
-    // calls (with the LOCAL_CLIENT_ID second arg) transition items out of
-    // scheduled state first pass on current Steam builds. If this branch
-    // ever fires in real telemetry, that's a signal Valve broke the CEF
-    // surface again and the fallback earned its keep.
-    if (stillScheduled.length > 0) {
-      logWarn(
-        `${stillScheduled.length} update(s) still stuck after SteamClient API retries — falling back to backend manifest edit + steam URL`,
-      );
-      for (const update of stillScheduled) {
-        try {
-          const res = await callPluginMethod<ForceUpdateResult>(
-            "force_steam_app_update",
-            [update.appId],
-            15_000,
-          );
-          log(
-            `force_steam_app_update(${update.appId}): success=${res.success}, manifest_modified=${res.manifest_modified}, url_invoked=${res.url_invoked}${res.error ? ", error=" + res.error : ""}`,
-          );
-        } catch (e) {
-          logError(`force_steam_app_update(${update.appId}) IPC failed:`, errorMessage(e));
-        }
-      }
-      // Steam needs a moment to re-read manifests + process the URL
-      await new Promise((r) => setTimeout(r, 6000));
-      recheck = await getPendingUpdates();
-      stillScheduled = recheck.filter((u) => u.state === "scheduled");
-      if (stillScheduled.length === 0) {
-        log("Backend manifest edit + steam URL cleared all remaining scheduled items");
-      } else {
-        logWarn(
-          `${stillScheduled.length} of ${scheduledBefore} update(s) STILL scheduled after backend manifest edit: ${stillScheduled.map((u) => u.name).join(", ")}`,
-        );
-      }
-    }
-
-    // pendingCount reflects only items the plugin actually had work for —
-    // scheduled items at the start of this check. Items already in queued/
-    // downloading state are Steam's job and excluded from our count. With this:
-    //   - "X of X started" when we transitioned all scheduled items (green)
-    //   - "0 of X" or "Y of X" when some stayed stuck (yellow via statusColor)
-    //   - "Up to date" when nothing was scheduled (green)
-    const startedCount = scheduledBefore - stillScheduled.length;
-    const alreadyQueuedCount = pending.length - scheduledBefore;
-    log(
-      `Steam force-start summary: ${scheduledBefore} scheduled (${alreadyQueuedCount} already queued/downloading were ignored), ` +
-        `${Math.max(0, startedCount)} transitioned out of scheduled, ${stillScheduled.length} still stuck` +
-        ` | total=${Date.now() - steamT0}ms`,
-    );
-
     return {
       source: "steam",
       timestamp,
       pendingCount: scheduledBefore,
-      forcedCount: Math.max(0, startedCount),
+      forcedCount: 0,
       errors,
       updates: scheduledPending,
       flatpakUpdates: [],
@@ -807,14 +781,82 @@ export async function forceStartAllUpdates(): Promise<UpdateCheckResult> {
     };
   }
 
-  // No scheduled items to act on — return a clean "up to date" result even if
-  // Steam has already-queued items in flight (those aren't ours to manage).
-  log(`Steam check: no scheduled items to force-start | total=${Date.now() - steamT0}ms`);
+  // Diagnostic: dump the raw DownloadItem of the first scheduled app shortly
+  // after forcing to see which fields (deferred_time, queue_index, paused)
+  // actually changed. Compare with the pre-force dump in getPendingUpdates.
+  if (isDebugEnabled()) {
+    try {
+      const firstScheduledId = scheduledPending[0].appId;
+      await sleep(RECHECK_INTERVAL_MS);
+      const post = (await getRawDownloadItems()).find((it) => it.appid === firstScheduledId);
+      debug(
+        `POST-FORCE raw DownloadItem for appid=${firstScheduledId}:`,
+        post ? JSON.stringify(post) : "(no longer in download list)",
+      );
+    } catch (e) {
+      debug("Post-force dump failed:", errorMessage(e));
+    }
+  }
+
+  // forcedCount means "apps that actually left the scheduled state" — downloads
+  // we started — not "API calls made without throwing".
+  const recheckT0 = Date.now();
+  let { stillScheduled, unknown } = await waitForLeftScheduled(scheduledPending, RECHECK_TIMEOUT_MS);
+  debug(
+    `Steam: re-check settled in ${Date.now() - recheckT0}ms, ${stillScheduled.length} still scheduled${unknown ? " (state unknown)" : ""}`,
+  );
+
+  // Last-resort pass for the case where Steam ships another API regression and
+  // the SteamClient calls stop working: edit the manifest and invoke the steam URL.
+  if (stillScheduled.length > 0 && !unknown) {
+    logWarn(
+      `${stillScheduled.length} of ${scheduledBefore} update(s) still scheduled after SteamClient API calls — falling back to backend manifest edit + steam URL: ${stillScheduled.map((u) => u.name).join(", ")}`,
+    );
+    for (const update of stillScheduled) {
+      try {
+        const res = await callPluginMethod<ForceUpdateResult>("force_steam_app_update", [update.appId], 15_000);
+        log(
+          `force_steam_app_update(${update.appId}): success=${res.success}, manifest_modified=${res.manifest_modified}, url_invoked=${res.url_invoked}${res.error ? ", error=" + res.error : ""}`,
+        );
+      } catch (e) {
+        logError(`force_steam_app_update(${update.appId}) IPC failed:`, errorMessage(e));
+      }
+    }
+    // Steam needs a moment to re-read manifests + process the URL
+    ({ stillScheduled, unknown } = await waitForLeftScheduled(stillScheduled, BACKEND_RECHECK_TIMEOUT_MS));
+    if (stillScheduled.length === 0) {
+      log("Backend manifest edit + steam URL cleared all remaining scheduled items");
+    } else if (!unknown) {
+      logWarn(
+        `${stillScheduled.length} of ${scheduledBefore} update(s) STILL scheduled after backend manifest edit: ${stillScheduled.map((u) => u.name).join(", ")}`,
+      );
+    }
+  }
+
+  // pendingCount reflects only items the plugin had work for — scheduled apps
+  // at the start of this check:
+  //   - "X of X started" when every scheduled app transitioned (green)
+  //   - "Y of X" when some stayed stuck (yellow via statusColor)
+  //   - "Up to date" when nothing was scheduled (green)
+  const stuckIds = new Set(stillScheduled.map((u) => u.appId));
+  const forcedCount = [...scheduledIds].filter((id) => !stuckIds.has(id)).length;
+  if (unknown) {
+    const message = `${UNKNOWN_STATE_ERROR}; could not confirm ${stillScheduled.length} update(s) started`;
+    logWarn(`${message}: ${stillScheduled.map((u) => u.name).join(", ")}`);
+    errors.push(message);
+  }
+  const alreadyQueuedCount = pending.length - scheduledBefore;
+  log(
+    `Steam force-start summary: ${scheduledBefore} scheduled (${alreadyQueuedCount} already queued/downloading were ignored), ` +
+      `${forcedCount} transitioned out of scheduled, ${stuckIds.size} still stuck` +
+      ` | total=${Date.now() - steamT0}ms`,
+  );
+
   return {
     source: "steam",
     timestamp,
     pendingCount: scheduledBefore,
-    forcedCount: 0,
+    forcedCount,
     errors,
     updates: scheduledPending,
     flatpakUpdates: [],

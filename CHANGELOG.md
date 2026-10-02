@@ -6,6 +6,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+### Fixed
+
+- Quick Access panel no longer shifts 10 px left when the D-pad reaches the status rows (inline buttons overflowed the 300 px panel)
+- Decky plugin auto-updates now confirm the install prompt (Decky sends events as message type 5, not 3)
+- Decky Loader updates are detected (`updater/check_for_updates` returns `current` / `remote.tag_name`)
+- Flatpak results reach the UI instead of a duplicate-call "up to date" placeholder; real updates are toasted and recorded again
+- Masked Flatpak refs (`flatpak mask`) are no longer reported and "applied" on every check
+- A Flatpak apply is only reported when an installed commit actually changed
+- "Check All" shows live progress and cannot be started twice
+- One wake no longer starts up to three overlapping check batches
+- Error details are logged instead of `{}`
+
+### Changed
+
+- Backend calls share Decky's own connection instead of opening a WebSocket per call and per log line
+- Frontend log lines are sent to the backend in batches
+- Wake, game-close, and startup checks run Steam plus only the sources whose interval has elapsed; the last result per source survives reloads
+- Periodic checks use due times, so waking or changing a setting no longer restarts every interval
+- Steam is checked first by default (it is the fastest source and the one that starts downloads)
+- Flatpak checks run user and system scopes in parallel without the appstream-parsing name column (about 4 s to under 1 s)
+- Steam force-start polls for the scheduled state to clear instead of fixed 3 s and 5 s waits, and ignores superseded duplicate and zero-byte download entries
+- Settings, history, and check state are written atomically
+- Status rows, interval dropdowns, collapsible Advanced settings, and a day-grouped history list replace the long settings panel
+- CI uses pnpm 10 and Node 22 and runs a typecheck
+
 ### Added
 
 - Steam game updates: periodic scan for pending/scheduled updates and force-start

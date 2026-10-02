@@ -10,5 +10,5 @@
   "flatpakAutoApply": true,
   "checkOnWake": true,
   "interCheckDelayMs": 2000,
-  "checkOrder": ["steamos", "decky-loader", "decky", "flatpak", "steam"]
+  "checkOrder": ["steam", "decky", "steamos", "decky-loader", "flatpak"]
 }

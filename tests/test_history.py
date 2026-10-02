@@ -11,31 +11,15 @@ Run with: python3 -m unittest tests.test_history -v
 
 import sys
 import os
-import json
-import types
 import tempfile
 import shutil
 import asyncio
 import unittest
 
-# Stub decky
-decky_stub = types.ModuleType("decky")
-decky_stub.DECKY_PLUGIN_SETTINGS_DIR = "/tmp/test_autoupdate"
-decky_stub.DECKY_PLUGIN_DIR = "/tmp/test_autoupdate_plugin"
-decky_stub.logger = types.SimpleNamespace(
-    info=lambda *a: None,
-    error=lambda *a: None,
-    warning=lambda *a: None,
-)
-sys.modules["decky"] = decky_stub
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _stub import run  # noqa: E402
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from main import Plugin
-
-
-def run(coro):
-    """Helper to run async methods in tests."""
-    return asyncio.get_event_loop().run_until_complete(coro)
+from main import Plugin  # noqa: E402
 
 
 class TestHistory(unittest.TestCase):
@@ -133,6 +117,19 @@ class TestHistory(unittest.TestCase):
         run(self.p.add_history_entry(self._entry()))
         result = run(self.p.get_history())
         self.assertEqual(len(result), 1)
+
+    def test_corrupt_history_is_kept_aside_when_a_new_entry_is_added(self):
+        """The bad file is preserved as history.json.corrupt rather than silently overwritten."""
+        with open(self.p.history_path, "w") as f:
+            f.write("NOT JSON!!!")
+        run(self.p.add_history_entry(self._entry()))
+        with open(self.p.history_path + ".corrupt") as f:
+            self.assertEqual(f.read(), "NOT JSON!!!")
+        self.assertEqual(len(run(self.p.get_history())), 1)
+
+    def test_history_writes_leave_no_temp_file(self):
+        run(self.p.add_history_entry(self._entry()))
+        self.assertEqual(os.listdir(self.tmpdir), ["history.json"])
 
 
 if __name__ == "__main__":

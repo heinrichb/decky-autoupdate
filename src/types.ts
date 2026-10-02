@@ -30,7 +30,8 @@ export interface Settings {
 
 export type UpdateSource = "steam" | "flatpak" | "decky" | "decky-loader" | "steamos";
 export const ALL_SOURCES: readonly UpdateSource[] = ["steam", "flatpak", "decky", "decky-loader", "steamos"];
-export const LIGHTEST_FIRST_ORDER: readonly UpdateSource[] = ["steamos", "decky-loader", "decky", "flatpak", "steam"];
+/** Fastest checks first (measured medians: steam 0.15 s, decky 0.7 s, steamos 0.85 s, decky-loader 2.2 s, flatpak 4.3 s). */
+export const LIGHTEST_FIRST_ORDER: readonly UpdateSource[] = ["steam", "decky", "steamos", "decky-loader", "flatpak"];
 export const LEGACY_ORDER: readonly UpdateSource[] = ["steam", "flatpak", "decky", "decky-loader", "steamos"];
 export type Trigger = "auto" | "manual" | "wake" | "game-close";
 export type SourceStatus = "idle" | "checking" | "applying";
@@ -65,6 +66,21 @@ export interface UpdateCheckResult {
   updates: PendingUpdate[];
   flatpakUpdates: FlatpakUpdate[];
   deckyPluginUpdates: DeckyPluginUpdate[];
+}
+
+export interface BatchProgress {
+  trigger: Trigger;
+  total: number;
+  done: number;
+  current: UpdateSource | null;
+}
+
+/** Persisted per-source summary of the last completed check (backend check_state.json). */
+export interface CheckStateEntry {
+  timestamp: number;
+  pendingCount: number;
+  forcedCount: number;
+  errors: string[];
 }
 
 export interface HistoryEntry {
@@ -108,7 +124,7 @@ export const DEFAULT_SETTINGS: Settings = {
   steamosUpdateEnabled: false,
   steamosCheckIntervalMinutes: 1440,
   interCheckDelayMs: 2000,
-  checkOrder: ["steamos", "decky-loader", "decky", "flatpak", "steam"],
+  checkOrder: [...LIGHTEST_FIRST_ORDER],
 };
 
 // ── SteamClient download item shape (from CEF discovery) ──

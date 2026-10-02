@@ -1,39 +1,65 @@
 import { definePlugin, toaster } from "@decky/api";
-import { ButtonItem, DropdownItem, PanelSection, PanelSectionRow, SliderField, ToggleField } from "@decky/ui";
-import { useState, useEffect, useCallback, useRef, ReactNode } from "react";
-import { MdUpdate } from "react-icons/md";
-import { SourceStatus, LIGHTEST_FIRST_ORDER, LEGACY_ORDER } from "./types";
+import {
+  ButtonItem,
+  ConfirmModal,
+  Dropdown,
+  DropdownItem,
+  Field,
+  PanelSection,
+  PanelSectionRow,
+  SliderField,
+  ToggleField,
+  showModal,
+} from "@decky/ui";
+import { useState, useEffect, useRef, ReactNode } from "react";
+import { MdUpdate, MdRefresh, MdExpandMore, MdExpandLess } from "react-icons/md";
+import { LIGHTEST_FIRST_ORDER, LEGACY_ORDER } from "./types";
+import type { NotificationLevel, Settings, SourceStatus, UpdateSource, UpdateCheckResult } from "./types";
 import { service, ServiceState } from "./autoUpdateService";
 import { PLUGIN_VERSION } from "./version";
 import { getInstalledPlugins, InstalledPlugin } from "./deckyApi";
-import type { NotificationLevel, UpdateSource, UpdateCheckResult } from "./types";
 import {
   statusColor,
-  compactStatusText,
-  steamStatusLabel,
-  flatpakStatusLabel,
-  deckyStatusLabel,
-  deckyLoaderStatusLabel,
-  steamosStatusLabel,
+  shortStatusText,
+  shortHistorySummary,
+  sourceName,
+  sourceLabel,
+  formatClock,
+  formatWhen,
+  groupHistory,
   formatUpdateSummary,
   combinedToastBody,
   shouldToastResult,
   triggerLabel,
-  sourceLabel,
   logError,
+  COLOR_MUTED,
   COLOR_WARNING,
-  COLOR_SUCCESS,
 } from "./helpers";
 
 function useServiceState(): ServiceState {
-  const [, forceUpdate] = useState(0);
+  const [state, setState] = useState(() => service.getState());
 
   useEffect(() => {
-    const unsub = service.subscribe(() => forceUpdate((n) => n + 1));
+    const unsub = service.subscribe(() => setState(service.getState()));
+    // Catch a notify that fired between the first render and this subscription.
+    setState(service.getState());
     return unsub;
   }, []);
 
-  return service.getState();
+  return state;
+}
+
+// Survives the panel unmounting when the QAM closes.
+const uiOpen = new Map<string, boolean>();
+
+function useOpenState(id: string): [boolean, () => void] {
+  const [open, setOpen] = useState(() => uiOpen.get(id) ?? false);
+  const toggle = () =>
+    setOpen((o) => {
+      uiOpen.set(id, !o);
+      return !o;
+    });
+  return [open, toggle];
 }
 
 const SPINNER_STYLE: React.CSSProperties = {
@@ -43,7 +69,6 @@ const SPINNER_STYLE: React.CSSProperties = {
   border: "2px solid currentColor",
   borderTopColor: "transparent",
   borderRadius: "50%",
-  marginRight: 6,
   verticalAlign: "middle",
 };
 
@@ -58,556 +83,677 @@ function Spinner() {
   return <span ref={ref} style={SPINNER_STYLE} />;
 }
 
-function StatusButton({ status, label }: { status: SourceStatus; label: (s: SourceStatus) => string }) {
-  const busy = status !== "idle";
-  return (
-    <span>
-      {busy && <Spinner />}
-      {label(status)}
-    </span>
-  );
-}
+const ONE_LINE: React.CSSProperties = {
+  display: "block",
+  whiteSpace: "nowrap",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+};
+
+const HINT_STYLE: React.CSSProperties = { ...ONE_LINE, fontSize: 12, lineHeight: "16px", color: COLOR_MUTED };
+
+const BUSY_TEXT: Record<UpdateSource, string> = {
+  steam: "Starting downloads...",
+  flatpak: "Installing updates...",
+  decky: "Updating plugins...",
+  "decky-loader": "Updating Decky...",
+  steamos: "Downloading update...",
+};
 
 const NOTIFICATION_OPTIONS = [
   { data: "off" as NotificationLevel, label: "Off" },
-  { data: "updates-only" as NotificationLevel, label: "Updates only" },
-  { data: "all" as NotificationLevel, label: "All checks" },
+  { data: "updates-only" as NotificationLevel, label: "When updates are found" },
+  { data: "all" as NotificationLevel, label: "After every check" },
 ];
 
 const CHECK_ORDER_OPTIONS = [
-  { data: "lightest", label: "Lightest first (recommended)" },
+  { data: "lightest", label: "Fastest first" },
   { data: "legacy", label: "Legacy order" },
 ];
 
+const STEAM_INTERVALS = [5, 10, 15, 30, 60, 120];
+const FLATPAK_INTERVALS = [60, 120, 180, 360, 720, 1440];
+const LONG_INTERVALS = [60, 180, 360, 720, 1440, 2880];
+
+function intervalLabel(minutes: number): string {
+  if (minutes < 60) return `${minutes} min`;
+  const hours = minutes / 60;
+  return `${Number.isInteger(hours) ? hours : hours.toFixed(1)} h`;
+}
+
+function intervalOptions(values: number[], current: number) {
+  const all = values.includes(current) ? values : [...values, current].sort((a, b) => a - b);
+  return all.map((m) => ({ data: m, label: intervalLabel(m) }));
+}
+
+function IntervalItem({
+  minutes,
+  values,
+  onChange,
+}: {
+  minutes: number;
+  values: number[];
+  onChange: (minutes: number) => void;
+}) {
+  return (
+    <PanelSectionRow>
+      <DropdownItem
+        label="Check every"
+        indentLevel={1}
+        rgOptions={intervalOptions(values, minutes)}
+        selectedOption={minutes}
+        onChange={(opt) => onChange(opt.data)}
+      />
+    </PanelSectionRow>
+  );
+}
+
+function BelowDropdown<T>({
+  label,
+  description,
+  options,
+  selected,
+  onChange,
+}: {
+  label: string;
+  description?: ReactNode;
+  options: { data: T; label: string }[];
+  selected: T;
+  onChange: (value: T) => void;
+}) {
+  return (
+    <PanelSectionRow>
+      <Field label={label} description={description} childrenLayout="below" childrenContainerWidth="max">
+        <Dropdown rgOptions={options} selectedOption={selected} onChange={(opt) => onChange(opt.data)} />
+      </Field>
+    </PanelSectionRow>
+  );
+}
+
+function ExpandRow({
+  label,
+  description,
+  open,
+  onToggle,
+  indentLevel,
+}: {
+  label: string;
+  description?: ReactNode;
+  open: boolean;
+  onToggle: () => void;
+  indentLevel?: number;
+}) {
+  return (
+    <PanelSectionRow>
+      <Field
+        label={label}
+        description={description}
+        indentLevel={indentLevel}
+        focusable
+        onClick={onToggle}
+        onOKActionDescription={open ? "Collapse" : "Expand"}
+      >
+        {open ? <MdExpandLess /> : <MdExpandMore />}
+      </Field>
+    </PanelSectionRow>
+  );
+}
+
+// ── Status ─────────────────────────────────────────────
+
+function StatusRow({
+  source,
+  status,
+  lastCheck,
+  warning,
+  onCheck,
+}: {
+  source: UpdateSource;
+  status: SourceStatus;
+  lastCheck: UpdateCheckResult | null;
+  warning?: string;
+  onCheck: (source: UpdateSource) => void;
+}) {
+  const busy = status !== "idle";
+  let text: string;
+  let color: string;
+  if (busy) {
+    text = status === "applying" ? BUSY_TEXT[source] : "Checking...";
+    color = COLOR_MUTED;
+  } else if (warning) {
+    text = warning;
+    color = COLOR_WARNING;
+  } else {
+    text = shortStatusText(source, lastCheck);
+    color = statusColor(lastCheck);
+  }
+  const time = !busy && !warning && lastCheck ? formatWhen(lastCheck.timestamp, Date.now()) : "";
+
+  return (
+    <PanelSectionRow>
+      <Field
+        label={sourceName(source)}
+        description={
+          <span style={ONE_LINE}>
+            <span style={{ color }}>{text}</span>
+            {time ? <span style={{ color: COLOR_MUTED }}>{` · ${time}`}</span> : null}
+          </span>
+        }
+        focusable
+        onClick={() => {
+          if (!busy) onCheck(source);
+        }}
+        onOKActionDescription={busy ? undefined : "Check now"}
+      >
+        {busy ? <Spinner /> : <MdRefresh />}
+      </Field>
+    </PanelSectionRow>
+  );
+}
+
+function enabledSources(state: ServiceState): UpdateSource[] {
+  const s = state.settings;
+  const out: UpdateSource[] = [];
+  if (s.steamEnabled) out.push("steam");
+  if (s.flatpakEnabled && state.flatpakAvailable) out.push("flatpak");
+  if (s.deckyPluginUpdatesEnabled && state.deckyAvailable) out.push("decky");
+  if (s.deckyLoaderUpdateEnabled && state.deckyAvailable) out.push("decky-loader");
+  if (s.steamosUpdateEnabled && state.steamosAvailable) out.push("steamos");
+  return out;
+}
+
+const STATUS_FIELDS: Record<UpdateSource, { status: keyof ServiceState; lastCheck: keyof ServiceState }> = {
+  steam: { status: "steamStatus", lastCheck: "steamLastCheck" },
+  flatpak: { status: "flatpakStatus", lastCheck: "flatpakLastCheck" },
+  decky: { status: "deckyStatus", lastCheck: "deckyLastCheck" },
+  "decky-loader": { status: "deckyLoaderStatus", lastCheck: "deckyLoaderLastCheck" },
+  steamos: { status: "steamosStatus", lastCheck: "steamosLastCheck" },
+};
+
+function nextCheckHint(state: ServiceState, sources: UpdateSource[]): string {
+  if (state.gameRunning && !state.settings.checkDuringGameplay) return "Automatic checks paused while a game runs";
+  let next: { source: UpdateSource; at: number } | null = null;
+  for (const source of sources) {
+    const at = service.nextDueAt(source);
+    if (at != null && (!next || at < next.at)) next = { source, at };
+  }
+  if (!next) return "No automatic checks scheduled";
+  const now = Date.now();
+  const when = next.at <= now ? "soon" : formatWhen(next.at, now);
+  return `Next check ${when} · ${sourceName(next.source)}`;
+}
+
+function StatusSection({ state }: { state: ServiceState }) {
+  const { settings, batch } = state;
+  const sources = enabledSources(state);
+  const anyBusy = sources.some((src) => state[STATUS_FIELDS[src].status] !== "idle");
+
+  const checkOne = async (source: UpdateSource) => {
+    const result = await service.triggerCheck(source, "manual");
+    if (result && shouldToastResult(settings.notificationLevel, result)) {
+      toaster.toast({ title: `${sourceLabel(source)} Updates`, body: formatUpdateSummary(result) });
+    }
+  };
+
+  const checkAll = async () => {
+    const results = await service.triggerAll("manual");
+    if (results.length === 0 || settings.notificationLevel === "off") return;
+    const body = combinedToastBody(results, settings.notificationLevel);
+    if (body) toaster.toast({ title: "AutoUpdate", body });
+  };
+
+  let checkAllLabel: ReactNode = "Check all now";
+  if (batch) {
+    checkAllLabel = (
+      <span>
+        <Spinner /> {`Checking ${Math.min(batch.done + 1, batch.total)} of ${batch.total}...`}
+      </span>
+    );
+  }
+
+  return (
+    <PanelSection title="Status">
+      {sources.length >= 2 && (
+        <PanelSectionRow>
+          <ButtonItem layout="below" disabled={!!batch || anyBusy} onClick={checkAll}>
+            {checkAllLabel}
+          </ButtonItem>
+        </PanelSectionRow>
+      )}
+
+      {sources.map((source) => (
+        <StatusRow
+          key={source}
+          source={source}
+          status={state[STATUS_FIELDS[source].status] as SourceStatus}
+          lastCheck={state[STATUS_FIELDS[source].lastCheck] as UpdateCheckResult | null}
+          warning={source === "steam" && !state.steamReady ? "SteamClient unavailable" : undefined}
+          onCheck={checkOne}
+        />
+      ))}
+
+      {sources.length === 0 ? (
+        <PanelSectionRow>
+          <div style={HINT_STYLE}>No update sources enabled</div>
+        </PanelSectionRow>
+      ) : (
+        <PanelSectionRow>
+          <div style={{ ...HINT_STYLE, padding: "8px 0" }}>{nextCheckHint(state, sources)}</div>
+        </PanelSectionRow>
+      )}
+    </PanelSection>
+  );
+}
+
+// ── Sources ────────────────────────────────────────────
+
+type UpdateFn = (partial: Partial<Settings>) => void;
+
+function SkipList({ settings, update }: { settings: Settings; update: UpdateFn }) {
+  const [open, toggle] = useOpenState("skip-list");
+  const [plugins, setPlugins] = useState<InstalledPlugin[] | null>(null);
+
+  useEffect(() => {
+    if (!open) setPlugins(null);
+  }, [open]);
+
+  useEffect(() => {
+    if (!open || plugins) return;
+    let cancelled = false;
+    getInstalledPlugins()
+      .then((list) => {
+        if (!cancelled) setPlugins(list.filter((p) => p.name !== "AutoUpdate"));
+      })
+      .catch((e) => {
+        logError("Failed to load installed plugins:", e);
+        if (!cancelled) setPlugins([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, plugins]);
+
+  const skipped = settings.deckyPluginBlacklist;
+  const isSkipped = (name: string) => skipped.some((b) => b.toLowerCase() === name.toLowerCase());
+
+  return (
+    <>
+      <ExpandRow
+        label="Skipped plugins"
+        description={skipped.length === 0 ? "None skipped" : `${skipped.length} skipped`}
+        open={open}
+        onToggle={toggle}
+        indentLevel={1}
+      />
+      {open && plugins === null && (
+        <PanelSectionRow>
+          <div style={{ ...HINT_STYLE, padding: "8px 0" }}>
+            <Spinner /> Loading plugins...
+          </div>
+        </PanelSectionRow>
+      )}
+      {open && plugins?.length === 0 && (
+        <PanelSectionRow>
+          <div style={{ ...HINT_STYLE, padding: "8px 0" }}>No other plugins installed</div>
+        </PanelSectionRow>
+      )}
+      {open &&
+        plugins?.map((plugin) => (
+          <PanelSectionRow key={plugin.name}>
+            <ToggleField
+              label={plugin.name}
+              description={isSkipped(plugin.name) ? "Skipped" : `v${plugin.version}`}
+              indentLevel={2}
+              checked={isSkipped(plugin.name)}
+              onChange={(val) =>
+                update({
+                  deckyPluginBlacklist: val
+                    ? [...skipped, plugin.name]
+                    : skipped.filter((b) => b.toLowerCase() !== plugin.name.toLowerCase()),
+                })
+              }
+            />
+          </PanelSectionRow>
+        ))}
+    </>
+  );
+}
+
+function SourcesSection({ state, update }: { state: ServiceState; update: UpdateFn }) {
+  const { settings } = state;
+  const deckyAny = settings.deckyPluginUpdatesEnabled || settings.deckyLoaderUpdateEnabled;
+
+  return (
+    <PanelSection title="Update Sources">
+      <PanelSectionRow>
+        <ToggleField
+          label="Steam Apps"
+          description="Start scheduled game downloads"
+          checked={settings.steamEnabled}
+          onChange={(val) => update({ steamEnabled: val })}
+        />
+      </PanelSectionRow>
+      {settings.steamEnabled && (
+        <IntervalItem
+          minutes={settings.steamCheckIntervalMinutes}
+          values={STEAM_INTERVALS}
+          onChange={(m) => update({ steamCheckIntervalMinutes: m })}
+        />
+      )}
+
+      {state.flatpakAvailable && (
+        <>
+          <PanelSectionRow>
+            <ToggleField
+              label="Flatpak"
+              description="Desktop apps such as browsers"
+              checked={settings.flatpakEnabled}
+              onChange={(val) => update({ flatpakEnabled: val })}
+            />
+          </PanelSectionRow>
+          {settings.flatpakEnabled && (
+            <>
+              <IntervalItem
+                minutes={settings.flatpakCheckIntervalMinutes}
+                values={FLATPAK_INTERVALS}
+                onChange={(m) => update({ flatpakCheckIntervalMinutes: m })}
+              />
+              <PanelSectionRow>
+                <ToggleField
+                  label="Install automatically"
+                  description="Off: only check and report"
+                  indentLevel={1}
+                  checked={settings.flatpakAutoApply}
+                  onChange={(val) => update({ flatpakAutoApply: val })}
+                />
+              </PanelSectionRow>
+            </>
+          )}
+        </>
+      )}
+
+      {state.deckyAvailable && (
+        <>
+          <PanelSectionRow>
+            <ToggleField
+              label="Decky Plugins"
+              description="Update plugins from the Decky store"
+              checked={settings.deckyPluginUpdatesEnabled}
+              onChange={(val) => update({ deckyPluginUpdatesEnabled: val })}
+            />
+          </PanelSectionRow>
+          <PanelSectionRow>
+            <ToggleField
+              label="Decky Loader"
+              description="Keep Decky Loader itself up to date"
+              checked={settings.deckyLoaderUpdateEnabled}
+              onChange={(val) => update({ deckyLoaderUpdateEnabled: val })}
+            />
+          </PanelSectionRow>
+          {deckyAny && (
+            <IntervalItem
+              minutes={settings.deckyCheckIntervalMinutes}
+              values={LONG_INTERVALS}
+              onChange={(m) => update({ deckyCheckIntervalMinutes: m })}
+            />
+          )}
+          {settings.deckyPluginUpdatesEnabled && <SkipList settings={settings} update={update} />}
+        </>
+      )}
+
+      {state.steamosAvailable && (
+        <>
+          <PanelSectionRow>
+            <ToggleField
+              label="SteamOS"
+              description="Download and stage; never reboots"
+              checked={settings.steamosUpdateEnabled}
+              onChange={(val) => update({ steamosUpdateEnabled: val })}
+            />
+          </PanelSectionRow>
+          {settings.steamosUpdateEnabled && (
+            <IntervalItem
+              minutes={settings.steamosCheckIntervalMinutes}
+              values={LONG_INTERVALS}
+              onChange={(m) => update({ steamosCheckIntervalMinutes: m })}
+            />
+          )}
+        </>
+      )}
+    </PanelSection>
+  );
+}
+
+// ── Automatic checks ───────────────────────────────────
+
+const NOTIFICATION_HINT: Record<NotificationLevel, string> = {
+  off: "No toast notifications",
+  "updates-only": "Toast when updates are found or applied",
+  all: "Toast after every check",
+};
+
+function AutomaticSection({ settings, update }: { settings: Settings; update: UpdateFn }) {
+  return (
+    <PanelSection title="Automatic Checks">
+      <PanelSectionRow>
+        <ToggleField
+          label="After waking from sleep"
+          checked={settings.checkOnWake}
+          onChange={(val) => update({ checkOnWake: val })}
+        />
+      </PanelSectionRow>
+      <PanelSectionRow>
+        <ToggleField
+          label="After closing a game"
+          checked={settings.checkOnGameClose}
+          onChange={(val) => update({ checkOnGameClose: val })}
+        />
+      </PanelSectionRow>
+      <PanelSectionRow>
+        <ToggleField
+          label="During gameplay"
+          description="Allow checks while a game is running"
+          checked={settings.checkDuringGameplay}
+          onChange={(val) => update({ checkDuringGameplay: val })}
+        />
+      </PanelSectionRow>
+      <BelowDropdown
+        label="Notifications"
+        description={NOTIFICATION_HINT[settings.notificationLevel]}
+        options={NOTIFICATION_OPTIONS}
+        selected={settings.notificationLevel}
+        onChange={(level) => update({ notificationLevel: level })}
+      />
+    </PanelSection>
+  );
+}
+
+// ── Advanced ───────────────────────────────────────────
+
+function AdvancedSection({ settings, update }: { settings: Settings; update: UpdateFn }) {
+  const [open, toggle] = useOpenState("advanced");
+  const isLegacy =
+    settings.checkOrder.length === LEGACY_ORDER.length && settings.checkOrder.every((s, i) => s === LEGACY_ORDER[i]);
+
+  return (
+    <PanelSection title="Advanced">
+      <ExpandRow
+        label="Advanced settings"
+        description={open ? undefined : "History, check order, diagnostics"}
+        open={open}
+        onToggle={toggle}
+      />
+      {open && (
+        <>
+          <PanelSectionRow>
+            <ToggleField
+              label="Update history"
+              description="Keep a log of past update activity"
+              checked={settings.logHistory}
+              onChange={(val) => update({ logHistory: val })}
+            />
+          </PanelSectionRow>
+          <PanelSectionRow>
+            <SliderField
+              label="Pause between sources"
+              description="Gives Steam room to breathe during a batch"
+              value={settings.interCheckDelayMs / 1000}
+              min={0}
+              max={10}
+              step={0.5}
+              showValue
+              valueSuffix="s"
+              onChange={(val) => update({ interCheckDelayMs: Math.round(val * 1000) })}
+            />
+          </PanelSectionRow>
+          <BelowDropdown
+            label="Check order"
+            options={CHECK_ORDER_OPTIONS}
+            selected={isLegacy ? "legacy" : "lightest"}
+            onChange={(value) =>
+              update({ checkOrder: value === "legacy" ? [...LEGACY_ORDER] : [...LIGHTEST_FIRST_ORDER] })
+            }
+          />
+          <PanelSectionRow>
+            <ToggleField
+              label="Debug logging"
+              description="Verbose plugin log for troubleshooting"
+              checked={settings.debugLogging}
+              onChange={(val) => update({ debugLogging: val })}
+            />
+          </PanelSectionRow>
+          <PanelSectionRow>
+            <ButtonItem
+              layout="below"
+              onClick={async () => {
+                const dump = await service.dumpDiagnostics();
+                try {
+                  await navigator.clipboard.writeText(dump);
+                  toaster.toast({ title: "AutoUpdate", body: "Diagnostics copied to clipboard" });
+                } catch {
+                  toaster.toast({ title: "AutoUpdate", body: "Diagnostics written to log" });
+                }
+              }}
+            >
+              Dump diagnostics
+            </ButtonItem>
+          </PanelSectionRow>
+          <PanelSectionRow>
+            <Field label="Version" bottomSeparator="none">
+              <span style={{ color: COLOR_MUTED }}>{PLUGIN_VERSION}</span>
+            </Field>
+          </PanelSectionRow>
+        </>
+      )}
+    </PanelSection>
+  );
+}
+
+// ── History ────────────────────────────────────────────
+
+const HISTORY_PAGE = 30;
+
+function HistorySection({ state }: { state: ServiceState }) {
+  const [open, toggle] = useOpenState("history");
+  const [limit, setLimit] = useState(HISTORY_PAGE);
+  const entries = state.historyEntries;
+  const now = Date.now();
+  const groups = open ? groupHistory(entries, limit, now) : [];
+  const shown = groups.reduce((n, g) => n + g.rows.reduce((m, r) => m + r.count, 0), 0);
+
+  const confirmClear = () => {
+    showModal(
+      <ConfirmModal
+        strTitle="Clear update history?"
+        strDescription="This removes all recorded update activity."
+        strOKButtonText="Clear"
+        onOK={() => service.clearHistory()}
+      />,
+    );
+  };
+
+  return (
+    <PanelSection title="History">
+      <ExpandRow
+        label="Recent activity"
+        description={entries.length === 0 ? "Nothing recorded yet" : `${entries.length} entries`}
+        open={open}
+        onToggle={() => {
+          if (!open) service.refreshHistory();
+          toggle();
+        }}
+      />
+      {groups.map((group) => (
+        <div key={group.day}>
+          <PanelSectionRow>
+            <div style={{ ...HINT_STYLE, padding: "10px 0 2px", textTransform: "uppercase", letterSpacing: 0.5 }}>
+              {group.day}
+            </div>
+          </PanelSectionRow>
+          {group.rows.map(({ entry, count }) => (
+            <PanelSectionRow key={`${entry.source}-${entry.timestamp}`}>
+              <Field
+                label={
+                  <span style={ONE_LINE}>
+                    {`${sourceName(entry.source)}: ${shortHistorySummary(entry)}`}
+                    {count > 1 ? <span style={{ color: COLOR_MUTED }}>{` ×${count}`}</span> : null}
+                  </span>
+                }
+                description={triggerLabel(entry.trigger)}
+                focusable
+              >
+                <span style={{ color: COLOR_MUTED, fontSize: 12 }}>{formatClock(entry.timestamp)}</span>
+              </Field>
+            </PanelSectionRow>
+          ))}
+        </div>
+      ))}
+      {open && shown < entries.length && (
+        <PanelSectionRow>
+          <ButtonItem layout="below" onClick={() => setLimit((l) => l + HISTORY_PAGE)}>
+            Show older
+          </ButtonItem>
+        </PanelSectionRow>
+      )}
+      {open && entries.length > 0 && (
+        <PanelSectionRow>
+          <ButtonItem layout="below" onClick={confirmClear}>
+            Clear history
+          </ButtonItem>
+        </PanelSectionRow>
+      )}
+    </PanelSection>
+  );
+}
+
+// ── Panel ──────────────────────────────────────────────
+
 function AutoUpdatePanel() {
   const state = useServiceState();
-  const { settings } = state;
-
-  const update = useCallback(async (partial: Partial<typeof settings>) => {
-    await service.updateSettings(partial);
-  }, []);
-
-  const [expanded, setExpanded] = useState(false);
-  const [showBlacklist, setShowBlacklist] = useState(false);
-  const [installedPlugins, setInstalledPlugins] = useState<InstalledPlugin[]>([]);
+  const update: UpdateFn = (partial) => {
+    service.updateSettings(partial);
+  };
 
   if (!state.settingsLoaded) {
     return (
-      <PanelSection title="AutoUpdate">
+      <PanelSection>
         <PanelSectionRow>
-          <span>Loading...</span>
+          <div style={{ ...HINT_STYLE, padding: "8px 0" }}>
+            <Spinner /> Loading...
+          </div>
         </PanelSectionRow>
       </PanelSection>
     );
   }
 
-  const steamBusy = state.steamStatus !== "idle";
-  const flatpakBusy = state.flatpakStatus !== "idle";
-  const deckyBusy = state.deckyStatus !== "idle";
-  const deckyLoaderBusy = state.deckyLoaderStatus !== "idle";
-  const steamosBusy = state.steamosStatus !== "idle";
-  const anyChecking = steamBusy || flatpakBusy || deckyBusy || deckyLoaderBusy || steamosBusy;
-
-  const enabledSourceCount = [
-    settings.steamEnabled,
-    settings.flatpakEnabled && state.flatpakAvailable,
-    settings.deckyPluginUpdatesEnabled && state.deckyAvailable,
-    settings.deckyLoaderUpdateEnabled && state.deckyAvailable,
-    settings.steamosUpdateEnabled && state.steamosAvailable,
-  ].filter(Boolean).length;
-
-  const statusDesc = (source: UpdateSource, lastCheck: UpdateCheckResult | null, warning?: string): ReactNode => {
-    const text = warning || compactStatusText(source, lastCheck);
-    const color = warning ? COLOR_WARNING : statusColor(lastCheck);
-    const time = lastCheck ? new Date(lastCheck.timestamp).toLocaleTimeString() : "";
-    return (
-      <span style={{ color }}>
-        {text}
-        {time ? (
-          <span style={{ opacity: 0.5 }}>
-            {" "}
-            {"\u00b7"} {time}
-          </span>
-        ) : null}
-      </span>
-    );
-  };
-
-  const handleCheck = async (source: UpdateSource) => {
-    const result = await service.triggerCheck(source, "manual");
-    if (shouldToastResult(settings.notificationLevel, result)) {
-      toaster.toast({ title: `${sourceLabel(source)} Updates`, body: formatUpdateSummary(result) });
-    }
-  };
-
   return (
-    <>
-      {/* ── Status ─────────────────────────────── */}
-      <PanelSection title="Status">
-        {enabledSourceCount >= 2 && (
-          <PanelSectionRow>
-            <ButtonItem
-              layout="below"
-              disabled={anyChecking}
-              onClick={async () => {
-                const results = await service.triggerAll("manual");
-                if (settings.notificationLevel !== "off") {
-                  const body = combinedToastBody(results, settings.notificationLevel);
-                  if (body) toaster.toast({ title: "AutoUpdate", body });
-                }
-              }}
-            >
-              {anyChecking ? (
-                <span>
-                  <Spinner />
-                  Checking...
-                </span>
-              ) : (
-                "Check All"
-              )}
-            </ButtonItem>
-          </PanelSectionRow>
-        )}
-
-        {settings.steamEnabled && (
-          <>
-            <PanelSectionRow>
-              <ButtonItem
-                label="Steam Apps"
-                description={statusDesc(
-                  "steam",
-                  state.steamLastCheck,
-                  !state.steamReady ? "SteamClient unavailable" : undefined,
-                )}
-                layout="inline"
-                disabled={steamBusy}
-                onClick={() => handleCheck("steam")}
-              >
-                <StatusButton status={state.steamStatus} label={steamStatusLabel} />
-              </ButtonItem>
-            </PanelSectionRow>
-          </>
-        )}
-
-        {state.flatpakAvailable && settings.flatpakEnabled && (
-          <>
-            <PanelSectionRow>
-              <ButtonItem
-                label="Flatpak"
-                description={statusDesc("flatpak", state.flatpakLastCheck)}
-                layout="inline"
-                disabled={flatpakBusy}
-                onClick={() => handleCheck("flatpak")}
-              >
-                <StatusButton status={state.flatpakStatus} label={flatpakStatusLabel} />
-              </ButtonItem>
-            </PanelSectionRow>
-          </>
-        )}
-
-        {state.deckyAvailable && settings.deckyPluginUpdatesEnabled && (
-          <>
-            <PanelSectionRow>
-              <ButtonItem
-                label="Decky Plugins"
-                description={statusDesc("decky", state.deckyLastCheck)}
-                layout="inline"
-                disabled={deckyBusy}
-                onClick={() => handleCheck("decky")}
-              >
-                <StatusButton status={state.deckyStatus} label={deckyStatusLabel} />
-              </ButtonItem>
-            </PanelSectionRow>
-          </>
-        )}
-
-        {state.deckyAvailable && settings.deckyLoaderUpdateEnabled && (
-          <PanelSectionRow>
-            <ButtonItem
-              label="Decky Loader"
-              description={statusDesc("decky-loader", state.deckyLoaderLastCheck)}
-              layout="inline"
-              disabled={deckyLoaderBusy}
-              onClick={() => handleCheck("decky-loader")}
-            >
-              <StatusButton status={state.deckyLoaderStatus} label={deckyLoaderStatusLabel} />
-            </ButtonItem>
-          </PanelSectionRow>
-        )}
-
-        {state.steamosAvailable && settings.steamosUpdateEnabled && (
-          <PanelSectionRow>
-            <ButtonItem
-              label="SteamOS"
-              description={statusDesc("steamos", state.steamosLastCheck)}
-              layout="inline"
-              disabled={steamosBusy}
-              onClick={() => handleCheck("steamos")}
-            >
-              <StatusButton status={state.steamosStatus} label={steamosStatusLabel} />
-            </ButtonItem>
-          </PanelSectionRow>
-        )}
-      </PanelSection>
-
-      {/* ── Update Sources ─────────────────────── */}
-      <PanelSection title="Update Sources">
-        <PanelSectionRow>
-          <ToggleField
-            label="Steam game updates"
-            description="Unpauses and force-starts scheduled game downloads"
-            checked={settings.steamEnabled}
-            onChange={(val) => update({ steamEnabled: val })}
-          />
-        </PanelSectionRow>
-
-        {settings.steamEnabled && (
-          <PanelSectionRow>
-            <SliderField
-              label="Check every (minutes)"
-              value={settings.steamCheckIntervalMinutes}
-              min={5}
-              max={120}
-              step={5}
-              showValue
-              onChange={(val) => update({ steamCheckIntervalMinutes: val })}
-            />
-          </PanelSectionRow>
-        )}
-
-        {state.flatpakAvailable && (
-          <>
-            <PanelSectionRow>
-              <ToggleField
-                label="Flatpak app updates"
-                description="Check for updates to Flatpak apps (e.g. Firefox, Discord)"
-                checked={settings.flatpakEnabled}
-                onChange={(val) => update({ flatpakEnabled: val })}
-              />
-            </PanelSectionRow>
-
-            {settings.flatpakEnabled && (
-              <>
-                <PanelSectionRow>
-                  <SliderField
-                    label="Check every (hours)"
-                    value={settings.flatpakCheckIntervalMinutes / 60}
-                    min={1}
-                    max={24}
-                    step={1}
-                    showValue
-                    onChange={(val) => update({ flatpakCheckIntervalMinutes: val * 60 })}
-                  />
-                </PanelSectionRow>
-
-                <PanelSectionRow>
-                  <ToggleField
-                    label="Auto-install Flatpak updates"
-                    description="Install immediately when found. When off, only checks and reports."
-                    checked={settings.flatpakAutoApply}
-                    onChange={(val) => update({ flatpakAutoApply: val })}
-                  />
-                </PanelSectionRow>
-              </>
-            )}
-          </>
-        )}
-
-        {state.deckyAvailable && (
-          <>
-            <PanelSectionRow>
-              <ToggleField
-                label="Decky plugin updates"
-                description="Auto-update installed Decky plugins from the store"
-                checked={settings.deckyPluginUpdatesEnabled}
-                onChange={(val) => update({ deckyPluginUpdatesEnabled: val })}
-              />
-            </PanelSectionRow>
-
-            {settings.deckyPluginUpdatesEnabled && (
-              <>
-                <PanelSectionRow>
-                  <SliderField
-                    label="Check every (hours)"
-                    value={settings.deckyCheckIntervalMinutes / 60}
-                    min={1}
-                    max={48}
-                    step={1}
-                    showValue
-                    onChange={(val) => update({ deckyCheckIntervalMinutes: val * 60 })}
-                  />
-                </PanelSectionRow>
-
-                <PanelSectionRow>
-                  <ButtonItem
-                    layout="below"
-                    onClick={async () => {
-                      if (showBlacklist) {
-                        setShowBlacklist(false);
-                      } else {
-                        const plugins = await getInstalledPlugins();
-                        setInstalledPlugins(plugins.filter((p) => p.name !== "AutoUpdate"));
-                        setShowBlacklist(true);
-                      }
-                    }}
-                  >
-                    {showBlacklist ? "Hide skip list" : "Skip list"}
-                  </ButtonItem>
-                </PanelSectionRow>
-
-                {showBlacklist && (
-                  <div style={{ maxHeight: 250, overflowY: "auto" }}>
-                    {installedPlugins.length === 0 && (
-                      <PanelSectionRow>
-                        <div style={{ fontSize: "0.85em", opacity: 0.6 }}>No other plugins installed</div>
-                      </PanelSectionRow>
-                    )}
-                    {installedPlugins.map((plugin) => {
-                      const isSkipped = settings.deckyPluginBlacklist.some(
-                        (b) => b.toLowerCase() === plugin.name.toLowerCase(),
-                      );
-                      return (
-                        <PanelSectionRow key={plugin.name}>
-                          <ToggleField
-                            label={plugin.name}
-                            description={isSkipped ? "Skipped" : `v${plugin.version}`}
-                            checked={isSkipped}
-                            onChange={(val) => {
-                              const current = settings.deckyPluginBlacklist;
-                              if (val) {
-                                update({ deckyPluginBlacklist: [...current, plugin.name] });
-                              } else {
-                                update({
-                                  deckyPluginBlacklist: current.filter(
-                                    (b) => b.toLowerCase() !== plugin.name.toLowerCase(),
-                                  ),
-                                });
-                              }
-                            }}
-                          />
-                        </PanelSectionRow>
-                      );
-                    })}
-                  </div>
-                )}
-              </>
-            )}
-
-            <PanelSectionRow>
-              <ToggleField
-                label="Decky Loader updates"
-                description="Keep Decky Loader itself up to date"
-                checked={settings.deckyLoaderUpdateEnabled}
-                onChange={(val) => update({ deckyLoaderUpdateEnabled: val })}
-              />
-            </PanelSectionRow>
-          </>
-        )}
-
-        {state.steamosAvailable && (
-          <>
-            <PanelSectionRow>
-              <ToggleField
-                label="SteamOS updates"
-                description="Download and stage system updates (won't reboot automatically)"
-                checked={settings.steamosUpdateEnabled}
-                onChange={(val) => update({ steamosUpdateEnabled: val })}
-              />
-            </PanelSectionRow>
-
-            {settings.steamosUpdateEnabled && (
-              <PanelSectionRow>
-                <SliderField
-                  label="Check every (hours)"
-                  value={settings.steamosCheckIntervalMinutes / 60}
-                  min={1}
-                  max={48}
-                  step={1}
-                  showValue
-                  onChange={(val) => update({ steamosCheckIntervalMinutes: val * 60 })}
-                />
-              </PanelSectionRow>
-            )}
-          </>
-        )}
-      </PanelSection>
-
-      {/* ── Automatic Checks ───────────────────── */}
-      <PanelSection title="Automatic Checks">
-        <PanelSectionRow>
-          <ToggleField
-            label="After waking from sleep"
-            checked={settings.checkOnWake}
-            onChange={(val) => update({ checkOnWake: val })}
-          />
-        </PanelSectionRow>
-
-        <PanelSectionRow>
-          <ToggleField
-            label="After closing a game"
-            checked={settings.checkOnGameClose}
-            onChange={(val) => update({ checkOnGameClose: val })}
-          />
-        </PanelSectionRow>
-
-        <PanelSectionRow>
-          <ToggleField
-            label="During gameplay"
-            description="Run scheduled checks even while a game is running"
-            checked={settings.checkDuringGameplay}
-            onChange={(val) => update({ checkDuringGameplay: val })}
-          />
-        </PanelSectionRow>
-      </PanelSection>
-
-      {/* ── Advanced ───────────────────────────── */}
-      <PanelSection title="Advanced">
-        <PanelSectionRow>
-          <DropdownItem
-            label="Notifications"
-            description={
-              settings.notificationLevel === "off"
-                ? "No toast notifications"
-                : settings.notificationLevel === "updates-only"
-                  ? "Toast when updates are found or applied"
-                  : "Toast after every check, even if nothing found"
-            }
-            rgOptions={NOTIFICATION_OPTIONS}
-            selectedOption={settings.notificationLevel}
-            onChange={(opt) => update({ notificationLevel: opt.data })}
-          />
-        </PanelSectionRow>
-
-        <PanelSectionRow>
-          <ToggleField
-            label="Update history"
-            description="Keep a log of past update activity"
-            checked={settings.logHistory}
-            onChange={(val) => update({ logHistory: val })}
-          />
-        </PanelSectionRow>
-
-        <PanelSectionRow>
-          <SliderField
-            label="Delay between checks"
-            description={`${(settings.interCheckDelayMs / 1000).toFixed(1)}s pause between each update source to reduce UI lag`}
-            value={settings.interCheckDelayMs / 1000}
-            min={0}
-            max={10}
-            step={0.5}
-            notchCount={5}
-            notchLabels={[
-              { notchIndex: 0, label: "0s" },
-              { notchIndex: 1, label: "2.5s" },
-              { notchIndex: 2, label: "5s" },
-              { notchIndex: 3, label: "7.5s" },
-              { notchIndex: 4, label: "10s" },
-            ]}
-            onChange={(val) => update({ interCheckDelayMs: Math.round(val * 1000) })}
-          />
-        </PanelSectionRow>
-
-        <PanelSectionRow>
-          <DropdownItem
-            label="Check order"
-            description="Order in which update sources are checked"
-            rgOptions={CHECK_ORDER_OPTIONS}
-            selectedOption={
-              settings.checkOrder.length === LEGACY_ORDER.length &&
-              settings.checkOrder.every((s, i) => s === LEGACY_ORDER[i])
-                ? "legacy"
-                : "lightest"
-            }
-            onChange={(opt) =>
-              update({
-                checkOrder: opt.data === "legacy" ? [...LEGACY_ORDER] : [...LIGHTEST_FIRST_ORDER],
-              })
-            }
-          />
-        </PanelSectionRow>
-
-        <PanelSectionRow>
-          <ToggleField
-            label="Debug logging"
-            description="Verbose diagnostics in browser console and plugin log"
-            checked={settings.debugLogging}
-            onChange={(val) => update({ debugLogging: val })}
-          />
-        </PanelSectionRow>
-
-        <PanelSectionRow>
-          <ButtonItem
-            layout="below"
-            onClick={async () => {
-              const dump = await service.dumpDiagnostics();
-              try {
-                await navigator.clipboard.writeText(dump);
-                toaster.toast({ title: "AutoUpdate", body: "Diagnostics copied to clipboard" });
-              } catch {
-                toaster.toast({ title: "AutoUpdate", body: "Diagnostics written to log" });
-              }
-            }}
-          >
-            Dump diagnostics
-          </ButtonItem>
-        </PanelSectionRow>
-
-        <PanelSectionRow>
-          <div style={{ fontSize: "0.75em", opacity: 0.4, textAlign: "center", padding: "4px 0" }}>
-            AutoUpdate v{PLUGIN_VERSION}
-          </div>
-        </PanelSectionRow>
-      </PanelSection>
-
-      {/* ── History ────────────────────────────── */}
-      {settings.logHistory && (
-        <PanelSection title="History">
-          <PanelSectionRow>
-            <ButtonItem
-              layout="below"
-              onClick={() => {
-                const next = !expanded;
-                setExpanded(next);
-                if (next) service.refreshHistory();
-              }}
-            >
-              {expanded ? "Hide history" : `Show history (${state.historyEntries.length})`}
-            </ButtonItem>
-          </PanelSectionRow>
-
-          {expanded && (
-            <>
-              <div style={{ maxHeight: 300, overflowY: "auto" }}>
-                {state.historyEntries.map((entry) => (
-                  <PanelSectionRow key={`${entry.source}-${entry.timestamp}`}>
-                    <div style={{ fontSize: "0.8em", padding: "4px 0" }}>
-                      <div
-                        style={{
-                          color: entry.forcedCount > 0 ? COLOR_SUCCESS : COLOR_WARNING,
-                          fontWeight: 500,
-                        }}
-                      >
-                        {formatUpdateSummary(entry)}
-                      </div>
-                      <div style={{ opacity: 0.5, fontSize: "0.9em", marginTop: 2 }}>
-                        {triggerLabel(entry.trigger)} {"\u00b7"} {new Date(entry.timestamp).toLocaleString()}
-                      </div>
-                    </div>
-                  </PanelSectionRow>
-                ))}
-              </div>
-              {state.historyEntries.length > 0 && (
-                <PanelSectionRow>
-                  <ButtonItem layout="below" onClick={() => service.clearHistory()}>
-                    Clear history
-                  </ButtonItem>
-                </PanelSectionRow>
-              )}
-            </>
-          )}
-        </PanelSection>
-      )}
-    </>
+    <div style={{ overflowX: "clip" }}>
+      <StatusSection state={state} />
+      <SourcesSection state={state} update={update} />
+      <AutomaticSection settings={state.settings} update={update} />
+      <AdvancedSection settings={state.settings} update={update} />
+      {state.settings.logHistory && <HistorySection state={state} />}
+    </div>
   );
 }
 
@@ -621,7 +767,6 @@ export default definePlugin(() => {
     title: "AutoUpdate",
     content: <AutoUpdatePanel />,
     icon: <MdUpdate />,
-    alwaysRender: true,
     onDismount() {
       service.stop();
     },

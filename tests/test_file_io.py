@@ -12,24 +12,15 @@ Run with: python3 -m unittest tests.test_file_io -v
 import sys
 import os
 import json
-import types
 import tempfile
 import shutil
 import unittest
+from unittest.mock import patch
 
-# Stub decky
-decky_stub = types.ModuleType("decky")
-decky_stub.DECKY_PLUGIN_SETTINGS_DIR = "/tmp/test_autoupdate"
-decky_stub.DECKY_PLUGIN_DIR = "/tmp/test_autoupdate_plugin"
-decky_stub.logger = types.SimpleNamespace(
-    info=lambda *a: None,
-    error=lambda *a: None,
-    warning=lambda *a: None,
-)
-sys.modules["decky"] = decky_stub
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _stub import decky_stub  # noqa: E402
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from main import Plugin
+from main import Plugin  # noqa: E402
 
 
 class TestLoadJson(unittest.TestCase):
@@ -80,6 +71,53 @@ class TestLoadJson(unittest.TestCase):
         result = p._load_json(path, [])
         self.assertEqual(result, [1, 2, 3])
 
+    def test_corrupt_file_is_renamed_aside(self):
+        path = self._path("history.json")
+        with open(path, "w") as f:
+            f.write("{broken json!!!")
+        p = Plugin()
+        self.assertEqual(p._load_json(path, {"safe": True}), {"safe": True})
+        self.assertFalse(os.path.exists(path))
+        with open(path + ".corrupt") as f:
+            self.assertEqual(f.read(), "{broken json!!!")
+
+    def test_empty_file_is_renamed_aside(self):
+        path = self._path("empty.json")
+        open(path, "w").close()
+        Plugin()._load_json(path, {})
+        self.assertTrue(os.path.exists(path + ".corrupt"))
+
+    def test_corruption_is_logged(self):
+        path = self._path("settings.json")
+        with open(path, "w") as f:
+            f.write("nope")
+        decky_stub.logger.records.clear()
+        Plugin()._load_json(path, {})
+        self.assertTrue(any("settings.json" in m for m in decky_stub.logger.messages("error")))
+
+    def test_binary_garbage_is_renamed_aside(self):
+        path = self._path("binary.json")
+        with open(path, "wb") as f:
+            f.write(b"\xff\xfe\x00\x80")
+        self.assertEqual(Plugin()._load_json(path, {"x": 1}), {"x": 1})
+        self.assertTrue(os.path.exists(path + ".corrupt"))
+
+    def test_missing_file_is_not_renamed_or_logged(self):
+        decky_stub.logger.records.clear()
+        Plugin()._load_json(self._path("nope.json"), {})
+        self.assertEqual(os.listdir(self.tmpdir), [])
+        self.assertEqual(decky_stub.logger.messages("error"), [])
+
+    def test_newer_corruption_replaces_older_quarantine_file(self):
+        path = self._path("history.json")
+        p = Plugin()
+        for text in ("first bad", "second bad"):
+            with open(path, "w") as f:
+                f.write(text)
+            p._load_json(path, {})
+        with open(path + ".corrupt") as f:
+            self.assertEqual(f.read(), "second bad")
+
 
 class TestWriteJson(unittest.TestCase):
 
@@ -117,16 +155,78 @@ class TestWriteJson(unittest.TestCase):
             data = json.load(f)
         self.assertEqual(data["v"], 2)
 
+    def test_write_leaves_no_temp_file(self):
+        path = self._path("out.json")
+        Plugin()._write_json(path, {"a": 1})
+        self.assertEqual(os.listdir(self.tmpdir), ["out.json"])
+
+    def test_write_fsyncs_before_replacing(self):
+        path = self._path("out.json")
+        events = []
+        real_fsync, real_replace = os.fsync, os.replace
+        with patch("os.fsync", side_effect=lambda fd: (events.append("fsync"), real_fsync(fd))[1]), \
+             patch("os.replace", side_effect=lambda a, b: (events.append("replace"), real_replace(a, b))[1]):
+            self.assertTrue(Plugin()._write_json(path, {"a": 1}))
+        self.assertEqual(events, ["fsync", "replace"])
+
+    def test_failed_replace_keeps_original_and_removes_temp(self):
+        path = self._path("keep.json")
+        p = Plugin()
+        p._write_json(path, {"v": "original"})
+        with patch("os.replace", side_effect=OSError("disk gone")):
+            self.assertFalse(p._write_json(path, {"v": "new"}))
+        with open(path) as f:
+            self.assertEqual(json.load(f), {"v": "original"})
+        self.assertEqual(os.listdir(self.tmpdir), ["keep.json"])
+
+    def test_failed_serialization_keeps_original_and_removes_temp(self):
+        path = self._path("keep.json")
+        p = Plugin()
+        p._write_json(path, {"v": "original"})
+        self.assertFalse(p._write_json(path, {"v": object()}))
+        with open(path) as f:
+            self.assertEqual(json.load(f), {"v": "original"})
+        self.assertEqual(os.listdir(self.tmpdir), ["keep.json"])
+
+    def test_failed_first_write_leaves_nothing_behind(self):
+        path = self._path("new.json")
+        with patch("os.replace", side_effect=OSError("disk gone")):
+            self.assertFalse(Plugin()._write_json(path, {"v": 1}))
+        self.assertEqual(os.listdir(self.tmpdir), [])
+
+    def test_existing_file_ownership_and_mode_are_preserved(self):
+        path = self._path("owned.json")
+        p = Plugin()
+        p._write_json(path, {"v": 1})
+        os.chmod(path, 0o640)
+        st = os.stat(path)
+        with patch("os.chown") as chown:
+            self.assertTrue(p._write_json(path, {"v": 2}))
+        chown.assert_called_once_with(path + ".tmp", st.st_uid, st.st_gid)
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o640)
+
+    def test_new_file_is_not_chowned(self):
+        with patch("os.chown") as chown:
+            self.assertTrue(Plugin()._write_json(self._path("fresh.json"), {"v": 1}))
+        chown.assert_not_called()
+
+    def test_chown_failure_does_not_fail_the_write(self):
+        path = self._path("owned.json")
+        p = Plugin()
+        p._write_json(path, {"v": 1})
+        with patch("os.chown", side_effect=PermissionError("not root")):
+            self.assertTrue(p._write_json(path, {"v": 2}))
+        with open(path) as f:
+            self.assertEqual(json.load(f), {"v": 2})
+
 
 class TestDefaultSettings(unittest.TestCase):
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
-        # Point decky stub at our temp dir
+        self.addCleanup(shutil.rmtree, self.tmpdir)
+        self.addCleanup(setattr, decky_stub, "DECKY_PLUGIN_DIR", decky_stub.DECKY_PLUGIN_DIR)
         decky_stub.DECKY_PLUGIN_DIR = self.tmpdir
-
-    def tearDown(self):
-        shutil.rmtree(self.tmpdir)
 
     def test_hardcoded_defaults_without_file(self):
         """When no defaults/settings.json exists, returns hardcoded defaults."""
@@ -204,6 +304,7 @@ class TestDefaultSettings(unittest.TestCase):
             "deckyPluginBlacklist",
             "deckyLoaderUpdateEnabled",
             "steamosUpdateEnabled", "steamosCheckIntervalMinutes",
+            "interCheckDelayMs", "checkOrder",
         }
         self.assertEqual(set(defaults.keys()), expected_keys)
 

@@ -14,22 +14,16 @@ Run with: python3 -m unittest tests.test_settings -v
 import sys
 import os
 import json
-import types
 import unittest
 
-# Stub out the `decky` module before importing main
-decky_stub = types.ModuleType("decky")
-decky_stub.DECKY_PLUGIN_SETTINGS_DIR = "/tmp/test_autoupdate_settings"
-decky_stub.DECKY_PLUGIN_DIR = "/tmp/test_autoupdate_plugin"
-decky_stub.logger = types.SimpleNamespace(
-    info=lambda *a: None,
-    error=lambda *a: None,
-    warning=lambda *a: None,
-)
-sys.modules["decky"] = decky_stub
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _stub import decky_stub  # noqa: E402
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from main import Plugin
+from main import Plugin  # noqa: E402
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+OLD_LIGHTEST_ORDER = ["steamos", "decky-loader", "decky", "flatpak", "steam"]
+LIGHTEST_ORDER = ["steam", "decky", "steamos", "decky-loader", "flatpak"]
 
 
 def make_plugin():
@@ -282,6 +276,54 @@ class TestValidateSettings(unittest.TestCase):
         })
         self.assertEqual(result["deckyCheckIntervalMinutes"], 60)
         self.assertEqual(result["steamosCheckIntervalMinutes"], 2880)
+
+    # ── checkOrder defaults and migration ──
+
+    def test_default_check_order_is_lightest_first(self):
+        p = make_plugin()
+        self.assertEqual(p._default_settings()["checkOrder"], LIGHTEST_ORDER)
+        self.assertEqual(p._validate_settings({})["checkOrder"], LIGHTEST_ORDER)
+
+    def test_shipped_defaults_file_uses_lightest_first_order(self):
+        with open(os.path.join(REPO_ROOT, "defaults", "settings.json")) as f:
+            self.assertEqual(json.load(f)["checkOrder"], LIGHTEST_ORDER)
+
+    def test_shipped_defaults_merge_to_lightest_first_order(self):
+        saved = decky_stub.DECKY_PLUGIN_DIR
+        decky_stub.DECKY_PLUGIN_DIR = REPO_ROOT
+        self.addCleanup(setattr, decky_stub, "DECKY_PLUGIN_DIR", saved)
+        self.assertEqual(Plugin()._default_settings()["checkOrder"], LIGHTEST_ORDER)
+
+    def test_old_lightest_order_migrates_to_new_lightest_order(self):
+        p = make_plugin()
+        result = p._validate_settings({"checkOrder": list(OLD_LIGHTEST_ORDER)})
+        self.assertEqual(result["checkOrder"], LIGHTEST_ORDER)
+
+    def test_migration_survives_save_round_trip(self):
+        p = make_plugin()
+        once = p._validate_settings({"checkOrder": list(OLD_LIGHTEST_ORDER)})
+        twice = p._validate_settings(json.loads(json.dumps(once)))
+        self.assertEqual(twice["checkOrder"], LIGHTEST_ORDER)
+
+    def test_custom_order_is_preserved(self):
+        p = make_plugin()
+        custom = ["flatpak", "steam", "decky", "steamos", "decky-loader"]
+        self.assertEqual(p._validate_settings({"checkOrder": list(custom)})["checkOrder"], custom)
+
+    def test_other_permutations_are_not_migrated(self):
+        p = make_plugin()
+        almost = ["steamos", "decky-loader", "decky", "steam", "flatpak"]
+        self.assertEqual(p._validate_settings({"checkOrder": list(almost)})["checkOrder"], almost)
+
+    def test_partial_order_is_completed_with_default_tail(self):
+        p = make_plugin()
+        result = p._validate_settings({"checkOrder": ["flatpak", "steam"]})
+        self.assertEqual(result["checkOrder"], ["flatpak", "steam", "decky", "steamos", "decky-loader"])
+
+    def test_unknown_and_duplicate_sources_are_dropped(self):
+        p = make_plugin()
+        result = p._validate_settings({"checkOrder": ["steam", "bogus", "steam", 5, "decky"]})
+        self.assertEqual(result["checkOrder"], ["steam", "decky", "steamos", "decky-loader", "flatpak"])
 
 
 if __name__ == "__main__":
