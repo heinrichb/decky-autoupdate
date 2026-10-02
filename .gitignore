@@ -1,0 +1,40 @@
+# Node
+node_modules/
+dist/
+.rollup.cache/
+
+# pnpm
+.pnpm-debug.log
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Decky build artifacts
+backend/out/
+out/
+bin/
+decky_plugin.py
+
+# Decky CLI
+cli/
+
+# Environment
+.env
+.env.local
+
+# Claude Code
+CLAUDE.md
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db

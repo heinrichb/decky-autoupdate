@@ -1,0 +1,12 @@
+{
+  "name": "AutoUpdate",
+  "version": "0.1.0",
+  "author": "Brennen Heinrich",
+  "flags": ["root"],
+  "api_version": 2,
+  "publish": {
+    "tags": ["utility", "downloads", "updates", "flatpak", "steamos", "decky"],
+    "description": "Auto-updater for Steam Deck that manages Steam game downloads, Flatpak apps, Decky plugins, Decky Loader, and SteamOS system updates.",
+    "image": "https://raw.githubusercontent.com/heinrichb/decky-autoupdate/main/assets/icon.png"
+  }
+}
