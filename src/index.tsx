@@ -693,13 +693,8 @@ function HistorySection({ state }: { state: ServiceState }) {
           {group.rows.map(({ entry, count }) => (
             <PanelSectionRow key={`${entry.source}-${entry.timestamp}`}>
               <Field
-                label={
-                  <span style={ONE_LINE}>
-                    {`${sourceName(entry.source)}: ${shortHistorySummary(entry)}`}
-                    {count > 1 ? <span style={{ color: COLOR_MUTED }}>{` ×${count}`}</span> : null}
-                  </span>
-                }
-                description={triggerLabel(entry.trigger)}
+                label={`${sourceName(entry.source)}: ${shortHistorySummary(entry)}`}
+                description={`${triggerLabel(entry.trigger)}${count > 1 ? ` · ${count} times` : ""}`}
                 focusable
               >
                 <span style={{ color: COLOR_MUTED, fontSize: 12 }}>{formatClock(entry.timestamp)}</span>

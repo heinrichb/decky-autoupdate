@@ -1114,7 +1114,7 @@ class Plugin:
             "deckyLoaderUpdateEnabled": False,
             "steamosUpdateEnabled": False,
             "steamosCheckIntervalMinutes": 1440,
-            "interCheckDelayMs": 2000,
+            "interCheckDelayMs": 500,
             "checkOrder": list(LIGHTEST_FIRST_ORDER),
         }
         defaults_path = os.path.join(
@@ -1148,15 +1148,18 @@ class Plugin:
 
     @staticmethod
     def _copy_owner_and_mode(tmp: str, path: str):
+        # The backend runs as root but the settings directory belongs to the deck user; files follow the directory.
         try:
-            existing = os.stat(path)
-        except OSError:
-            return
-        try:
-            os.chown(tmp, existing.st_uid, existing.st_gid)
-            os.chmod(tmp, stat.S_IMODE(existing.st_mode))
+            owner = os.stat(os.path.dirname(path) or ".")
+            os.chown(tmp, owner.st_uid, owner.st_gid)
         except OSError as e:
-            decky.logger.warning(f"Could not copy owner/mode of {path} to its replacement: {e}")
+            decky.logger.warning(f"Could not set the owner of {path}: {e}")
+        try:
+            os.chmod(tmp, stat.S_IMODE(os.stat(path).st_mode))
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            decky.logger.warning(f"Could not copy the mode of {path} to its replacement: {e}")
 
     def _write_json(self, path: str, data: dict | list) -> bool:
         tmp = f"{path}.tmp"

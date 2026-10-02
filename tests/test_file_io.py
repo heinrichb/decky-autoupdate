@@ -205,10 +205,15 @@ class TestWriteJson(unittest.TestCase):
         chown.assert_called_once_with(path + ".tmp", st.st_uid, st.st_gid)
         self.assertEqual(os.stat(path).st_mode & 0o777, 0o640)
 
-    def test_new_file_is_not_chowned(self):
+    def test_files_take_the_settings_directory_owner(self):
+        path = self._path("fresh.json")
+        directory = os.stat(os.path.dirname(path))
         with patch("os.chown") as chown:
-            self.assertTrue(Plugin()._write_json(self._path("fresh.json"), {"v": 1}))
-        chown.assert_not_called()
+            self.assertTrue(Plugin()._write_json(path, {"v": 1}))
+            self.assertTrue(Plugin()._write_json(path, {"v": 2}))
+        self.assertEqual(chown.call_count, 2)
+        for call in chown.call_args_list:
+            self.assertEqual(call.args[1:], (directory.st_uid, directory.st_gid))
 
     def test_chown_failure_does_not_fail_the_write(self):
         path = self._path("owned.json")

@@ -13,9 +13,14 @@ This file is a living document. Keep it up to date throughout development.
 
 ## Current Task
 
-**Milestone G (speed, reliability, QAM redesign)**: implemented 2026-10-02 on `develop`, not yet deployed.
+**Milestone G (speed, reliability, QAM redesign)**: deployed 2026-10-02 16:16 and verified on device in Big Picture
+over CEF: no horizontal shift (`scrollLeft` stays 0 across every row, `scrollWidth` 300), Check All shows
+"Checking N of M", startup and manual batches run with no WS-closed retries and no `Dropping message` lines, the Flatpak
+check is ~0.75-1.2 s and reports `0 update(s), 1 masked` with no `flatpak update`, Decky Loader check ~0.3 s. A
+follow-up commit (history labels wrap, count moved to the description; default pause 0.5 s; JSON files take the
+settings directory owner) still needs a redeploy.
 
-Deploy with `bash scripts/deploy.sh` (needs the sudo password), then verify on device:
+Still to verify on device:
 1. Open the QAM panel in Game Mode or Big Picture: no 10 px horizontal shift when the D-pad reaches the status rows;
    every row fits; Check All shows "Checking N of M".
 2. Plugin log after a reload shows `Wake detection: registered User.RegisterForResumeSuspendedGamesProgress`,

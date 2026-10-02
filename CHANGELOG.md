@@ -25,6 +25,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - Wake, game-close, and startup checks run Steam plus only the sources whose interval has elapsed; the last result per source survives reloads
 - Periodic checks use due times, so waking or changing a setting no longer restarts every interval
 - Steam is checked first by default (it is the fastest source and the one that starts downloads)
+- The default pause between sources is 0.5 s instead of 2 s
 - Flatpak checks run user and system scopes in parallel without the appstream-parsing name column (about 4 s to under 1 s)
 - Steam force-start polls for the scheduled state to clear instead of fixed 3 s and 5 s waits, and ignores superseded duplicate and zero-byte download entries
 - Settings, history, and check state are written atomically

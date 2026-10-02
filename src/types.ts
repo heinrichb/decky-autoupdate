@@ -123,7 +123,7 @@ export const DEFAULT_SETTINGS: Settings = {
   deckyLoaderUpdateEnabled: false,
   steamosUpdateEnabled: false,
   steamosCheckIntervalMinutes: 1440,
-  interCheckDelayMs: 2000,
+  interCheckDelayMs: 500,
   checkOrder: [...LIGHTEST_FIRST_ORDER],
 };
 
